@@ -24,6 +24,8 @@ from models.posenet import NetworkEval
 import warnings
 import os
 import argparse
+from apex import amp
+from skimage import io
 
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"  # choose the available GPUs
 warnings.filterwarnings("ignore")
@@ -39,7 +41,7 @@ parser = argparse.ArgumentParser(description='PoseNet Training')
 parser.add_argument('--resume', '-r', action='store_true', default=True, help='resume from checkpoint')
 parser.add_argument('--max_grad_norm', default=5, type=float,
                     help="If the norm of the gradient vector exceeds this, re-normalize it to have the norm equal to max_grad_norm")
-parser.add_argument('--image', type=str, default='try_image/ski.jpg', help='input image')  # required=True
+parser.add_argument('--image', type=str, default='try_image/COCO_val2014_000000128654.jpg', help='input image')  # required=True
 parser.add_argument('--output', type=str, default='result.jpg', help='output image')
 parser.add_argument('--opt-level', type=str, default='O1')
 parser.add_argument('--keep-batchnorm-fp32', type=str, default=None)
@@ -62,9 +64,9 @@ draw_list = config.draw_list
 
 
 def show_color_vector(oriImg, paf_avg, heatmap_avg):
-    hsv = np.zeros_like(oriImg)
-    hsv[..., 1] = 255
-
+    hsv = np.zeros_like(oriImg)  # > (imgH, imgW, 3)
+    hsv[..., 1] = 255  # > (imgH, imgW, (0,255,0))
+    # > convert from cartesian to polar
     mag, ang = cv2.cartToPolar(paf_avg[:, :, 16], 1.5 * paf_avg[:, :, 16])  # 设置不同的系数，可以使得显示颜色不同
 
     # 将弧度转换为角度，同时OpenCV中的H范围是180(0 - 179)，所以再除以2
@@ -103,76 +105,95 @@ def show_color_vector(oriImg, paf_avg, heatmap_avg):
 
 def process(input_image, params, model_params, heat_layers, paf_layers):
     oriImg = cv2.imread(input_image)  # B,G,R order.    训练数据的读入也是用opencv，因此也是B, G, R顺序
+    img_h, img_w, _ = oriImg.shape
     # oriImg = cv2.resize(oriImg, (768, 768))
     # oriImg = cv2.flip(oriImg, 1) 因为训练时作了flip，所以用这种方式提升并没有作用
-    multiplier = [x * model_params['boxsize'] / oriImg.shape[0] for x in params['scale_search']]  # 按照图片高度进行缩放
+    multiplier = [x * model_params['boxsize'] / img_h for x in params['scale_search']]  # 按照图片高度进行缩放
     # multipier = [0.21749408983451538, 0.43498817966903075, 0.6524822695035462, 0.8699763593380615],
-    # 首先把输入图像高度变成368,然后再做缩放
+    # --------------------------------------------------------------------------------------- #
+    # ------------------------  scale feature maps up to image size  -----------------------#
+    # --------------------------------------------------------------------------------------- #
+    # 首先把输入图像高度变成`368`,然后再做缩放
+    heatmap_avg = np.zeros((img_h, img_w, heat_layers))  # > `heatmap_avg`: (imgH, imgW, 20)
+    paf_avg = np.zeros((img_h, img_w, paf_layers))  # > `paf_layers`: (imgH, imgW, 30)
 
-    heatmap_avg = np.zeros(
-        (oriImg.shape[0], oriImg.shape[1], heat_layers))  # fixme if you change the number of keypoints
-    paf_avg = np.zeros((oriImg.shape[0], oriImg.shape[1], paf_layers))
-
-    for m in range(len(multiplier)):
+    for m in range(len(multiplier)):  # > #scales
         scale = multiplier[m]
 
-        if scale * oriImg.shape[0] > 2300 or scale * oriImg.shape[1] > 3200:
-            scale = min(2300 / oriImg.shape[0], 3200 / oriImg.shape[1])
+        if scale * img_h > 2300 or scale * img_w > 3200:
+            scale = min(2300 / img_h, 3200 / img_w)
             print("Input image is too big, shrink it !")
-
-        imageToTest = cv2.resize(oriImg, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)  # cv2.INTER_CUBIC
-        imageToTest_padded, pad = util.padRightDownCorner(imageToTest, model_params['max_downsample'],
+        # > `imageToTest`: (scaleH, scaleW, 3)
+        imageToTest = cv2.resize(oriImg, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        # > `imageToTest_padded`: (scale_padH, scale_padW, 3)
+        imageToTest_padded, pad = util.padRightDownCorner(imageToTest,
+                                                          model_params['max_downsample'],
                                                           model_params['padValue'])
+        scale_padH, scale_padW, _ = imageToTest_padded.shape
 
-        # ################################# Important!  ###########################################
-        # #############################  We use OpenCV to read image (BGR) all the time #######################
+        # ----------------------------------------------------------
+        # > WARN: `[1-1]`: we use OpenCV to read image`(BGR)` all the time
         # Input Tensor: a batch of images within [0,1], required shape in this project : (1, height, width, channels)
         input_img = np.float32(imageToTest_padded / 255)
         # input_img -= np.array(config.img_mean[::-1])  # Notice: OpenCV uses BGR format, reverse the last axises
         # input_img /= np.array(config.img_std[::-1])
-        # ################################## add flip image ################################
+
+        # ----------------------------------------------------------
+        # > `[1-2]` :add flip image
         swap_image = input_img[:, ::-1, :].copy()
         # plt.imshow(swap_image[:, :, [2, 1, 0]])  # Opencv image format: BGR
         # plt.show()
         input_img = np.concatenate((input_img[None, ...], swap_image[None, ...]),
-                                   axis=0)  # (2, height, width, channels)
+                                   axis=0)  # (2, H, W, C)
         input_img = torch.from_numpy(input_img).cuda()
-        # ###################################################################################
 
-        # output tensor dtype: float 16
+        # > (4,)=(2, 50, featH, featW) x 4, float16
         output_tuple = posenet(input_img)
 
-        # ############ different scales can be shown #############
-        output = output_tuple[-1][0].cpu().numpy()
+        # ----------------------------------------------------------
+        # > `[1-3]`: different scales can be shown
+        output = output_tuple[-1][0].cpu().numpy()  # > 1st-level of feature maps -> (2, 50, featH, featW)
 
-        output_blob = output[0].transpose((1, 2, 0))
-        output_blob0 = output_blob[:, :, :config.paf_layers]
-        output_blob1 = output_blob[:, :, config.paf_layers:config.num_layers]
+        output_blob = output[0].transpose((1, 2, 0))  # > (featH, featW, 50)
+        output_blob0 = output_blob[:, :, :config.paf_layers]  # > `PAF`:(featH, featW, 30)
+        output_blob1 = output_blob[:, :, config.paf_layers:config.num_layers]  # > `KP`:(featH, featW, 20)
+        # > flipped image output
+        output_blob_flip = output[1].transpose((1, 2, 0))  # > (featH, featW, 50)
+        output_blob0_flip = output_blob_flip[:, :, :config.paf_layers]  # `PAF`: (featH, featW, 30)
+        output_blob1_flip = output_blob_flip[:, :, config.paf_layers:config.num_layers]  # > `KP`: (featH, featW, 20)
 
-        output_blob_flip = output[1].transpose((1, 2, 0))
-        output_blob0_flip = output_blob_flip[:, :, :config.paf_layers]  # paf layers
-        output_blob1_flip = output_blob_flip[:, :, config.paf_layers:config.num_layers]  # keypoint layers
-
-        # ################################## flip ensemble ################################
-        output_blob0_avg = (output_blob0 + output_blob0_flip[:, ::-1, :][:, :, flip_paf_ord]) / 2
-        output_blob1_avg = (output_blob1 + output_blob1_flip[:, ::-1, :][:, :, flip_heat_ord]) / 2
+        # ----------------------------------------------------------
+        # > `[1-4]`: flip ensemble
+        output_blob0_avg = (output_blob0 + output_blob0_flip[:, ::-1, :][:, :, flip_paf_ord]) / 2  # > (featH, featW, 30)
+        output_blob1_avg = (output_blob1 + output_blob1_flip[:, ::-1, :][:, :, flip_heat_ord]) / 2  # > (featH, featW, 20)
 
         # extract outputs, resize, and remove padding
-        heatmap = cv2.resize(output_blob1_avg, (0, 0), fx=model_params['stride'], fy=model_params['stride'],
+        # > (featH, featW, 20) -> (scale_padH, scale_padW, 20)
+        heatmap = cv2.resize(output_blob1_avg, (0, 0),
+                             fx=model_params['stride'],  # > `stride`: 4
+                             fy=model_params['stride'],
                              interpolation=cv2.INTER_CUBIC)
-        heatmap = heatmap[:imageToTest_padded.shape[0] - pad[2], :imageToTest_padded.shape[1] - pad[3], :]
-        heatmap = cv2.resize(heatmap, (oriImg.shape[1], oriImg.shape[0]), interpolation=cv2.INTER_CUBIC)
+        # -> (scaleH, scaleW, 20)
+        heatmap = heatmap[:scale_padH - pad[2], :scale_padW - pad[3], :]
+        # -> (imgH, imgW, 20)
+        heatmap = cv2.resize(heatmap, (img_w, img_h), interpolation=cv2.INTER_CUBIC)
 
-        # output_blob0 is PAFs
-        paf = cv2.resize(output_blob0_avg, (0, 0), fx=model_params['stride'], fy=model_params['stride'],
+        # > `output_blob0` is PAFs
+        # > (featH, featW, 30) -> (scale_padH, scale_padW, 30)
+        paf = cv2.resize(output_blob0_avg, (0, 0),
+                         fx=model_params['stride'],  # > `stride`: 4
+                         fy=model_params['stride'],
                          interpolation=cv2.INTER_CUBIC)
-        paf = paf[:imageToTest_padded.shape[0] - pad[2], :imageToTest_padded.shape[1] - pad[3], :]
-        paf = cv2.resize(paf, (oriImg.shape[1], oriImg.shape[0]), interpolation=cv2.INTER_CUBIC)
-        # ##############################     为了让平均heatmap不那么模糊？     ################################3
+        # -> (scaleH, scaleW, 30)
+        paf = paf[:scale_padH - pad[2], :scale_padW - pad[3], :]
+        # -> (imgH, imgW, 30)
+        paf = cv2.resize(paf, (img_w, img_h), interpolation=cv2.INTER_CUBIC)
+
+        # ##############################     为了让平均heatmap不那么模糊？     ################################
         # heatmap[heatmap < params['thre1']] = 0
         # paf[paf < params['thre2']] = 0
         # ####################################################################################### #
-
+        # > `heatmap_avg`: (imgH, imgW, 20), `paf_avg`: (imgH, imgW, 30)
         heatmap_avg = heatmap_avg + heatmap / len(multiplier)
         paf_avg = paf_avg + paf / len(multiplier)
 
@@ -191,9 +212,7 @@ def process(input_image, params, model_params, heat_layers, paf_layers):
     show_color_vector(oriImg, paf_avg, heatmap_avg)
 
     # --------------------------------------------------------------------------------------- #
-    # ####################################################################################### #
     # ------------------------- find keypoints  ---------------------------------------------#
-    # ####################################################################################### #
     # --------------------------------------------------------------------------------------- #
 
     # smoothing = util.GaussianSmoothing(18, 5, 1)
@@ -259,7 +278,7 @@ def process(input_image, params, model_params, heat_layers, paf_layers):
         nA = len(candA)
         nB = len(candB)
         indexA, indexB = limbSeq[k]
-        if (nA != 0 and nB != 0):
+        if nA != 0 and nB != 0:
             connection_candidate = []
             for i in range(nA):
                 for j in range(nB):
@@ -280,7 +299,7 @@ def process(input_image, params, model_params, heat_layers, paf_layers):
                     score_midpts = limb_response
 
                     score_with_dist_prior = sum(score_midpts) / len(score_midpts) + min(
-                        0.5 * oriImg.shape[0] / norm - 1, 0)
+                        0.5 * img_h / norm - 1, 0)
                     # 这一项是为了惩罚过长的connection, 只有当长度大于图像高度的一半时才会惩罚 todo
                     # The term of sum(score_midpts)/len(score_midpts), see the link below.
                     # https://github.com/michalfaber/keras_Realtime_Multi-Person_Pose_Estimation/issues/48
@@ -601,7 +620,7 @@ if __name__ == '__main__':
     output = args.output
 
     posenet = NetworkEval(opt, config, bn=True)
-
+    print('> Model = ', posenet)
     print('Resuming from checkpoint ...... ')
 
     # #################################################
@@ -623,8 +642,6 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         posenet.cuda()
 
-    from apex import amp
-
     posenet = amp.initialize(posenet,
                              opt_level=args.opt_level,
                              keep_batchnorm_fp32=args.keep_batchnorm_fp32,
@@ -638,8 +655,9 @@ if __name__ == '__main__':
     tic = time.time()
     # generate image with body parts
     with torch.no_grad():
-        canvas = process(input_image, params, model_params, config.heat_layers + 2,
-                         config.paf_layers)  # todo background + 2
+        canvas = process(input_image, params, model_params,
+                         config.heat_layers + 2,  # `heat_layers`: 18 + 2(bg, reverse)
+                         config.paf_layers)  # > `paf_layers`: 30
 
     toc = time.time()
     print('processing time is %.5f' % (toc - tic))
@@ -647,17 +665,18 @@ if __name__ == '__main__':
     # TODO: the prediction is slow, how to fix it? Not solved yet. see:
     #  https://github.com/anatolix/keras_Realtime_Multi-Person_Pose_Estimation/issues/5
 
-    cv2.namedWindow("result", cv2.WINDOW_AUTOSIZE)  # cv2.WINDOW_NORMAL 自动适合的窗口大小
-    cv2.imshow('result', canvas)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-    cv2.imwrite(output, canvas)
+    # cv2.namedWindow("result", cv2.WINDOW_AUTOSIZE)  # cv2.WINDOW_NORMAL 自动适合的窗口大小
+    # cv2.imshow('result', canvas)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
+    # cv2.imwrite(output, canvas)
 
     # pdf = PdfPages(output + '.pdf')
     # plt.figure()
     # plt.plot(canvas[:, :, [2, 1, 0]])
-    # plt.tight_layout()
-    # plt.show()
+    plt.imshow(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    plt.tight_layout()
+    plt.show()
     # pdf.savefig()
     # plt.close()
     # pdf.close()

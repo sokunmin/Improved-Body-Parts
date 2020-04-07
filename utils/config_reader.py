@@ -4,7 +4,7 @@ import numpy as np
 
 
 def config_reader():
-    config = ConfigObj('/home/jia/Desktop/Improved-Body-Parts/utils/config')
+    config = ConfigObj('utils/config')
 
     param = config['param']  # 继承了dict的一种字典类型
     model_id = param['modelID']

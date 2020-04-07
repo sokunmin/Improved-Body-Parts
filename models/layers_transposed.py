@@ -157,6 +157,7 @@ class DilatedConv(nn.Module):
 
 class Backbone(nn.Module):
     """
+    Pyramid Residual Modules (PRMs)
     Input Tensor: a batch of images with shape (N, C, H, W)
     """
     def __init__(self, nFeat=256, inplanes=3, resBlock=Residual, dilatedBlock=DilatedConv):

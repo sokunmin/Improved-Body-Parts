@@ -24,6 +24,8 @@ from models.posenet import NetworkEval
 import warnings
 import os
 import argparse
+from apex import amp
+
 
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"  # choose the available GPUs
 warnings.filterwarnings("ignore")
@@ -586,7 +588,7 @@ def validation(model, dump_name, validation_ids=None, dataset='val2017'):
     annType = 'keypoints'
     prefix = 'person_keypoints'
 
-    dataDir = 'data/dataset/coco/link2coco2017'
+    dataDir = 'data/dataset/coco'
 
     # # # #############################################################################
     # For evaluation on validation set
@@ -633,8 +635,6 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         posenet.cuda()
 
-    from apex import amp
-
     posenet = amp.initialize(posenet, opt_level=args.opt_level,
                              keep_batchnorm_fp32=args.keep_batchnorm_fp32,
                              loss_scale=args.loss_scale)
@@ -652,6 +652,6 @@ if __name__ == "__main__":
     print('over!')
 
     #  若是在test数据集上进行预测并写结果，则
-    # annFile='/home/jia/Desktop/keras_Realtime_Multi-Person_Pose_Estimation-new-generation/dataset/coco/link2coco2017/annotations_trainval_info/image_info_test2017.json'
+    # annFile='keras_Realtime_Multi-Person_Pose_Estimation-new-generation/dataset/coco/link2coco2017/annotations_trainval_info/image_info_test2017.json'
     # cocoGt = COCO(annFile)
     # validation_ids = cocoGt.getImgIds() 将获得带有image id的一个list
