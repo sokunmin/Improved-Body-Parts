@@ -16,15 +16,14 @@ class AugmentSelection:
 
     @staticmethod  # staticmethod支持类对象或者实例对方法的调用
     def random(transform_params):
-        flip = random.uniform(0., 1.) < transform_params.flip_prob
-        tint = random.uniform(0., 1.) < transform_params.tint_prob
-        degree = random.uniform(-1., 1.) * transform_params.max_rotate_degree
-
+        flip = random.uniform(0., 1.) < transform_params.flip_prob  # > 0.5
+        tint = random.uniform(0., 1.) < transform_params.tint_prob  # > 0.2
+        degree = random.uniform(-1., 1.) * transform_params.max_rotate_degree  # > 40
+        # `scale_prob`: 0.8, `scale_max`: 1.3, `scale_min`: 0.7 -> random scale [0.7, 1.3]
         scale = (transform_params.scale_max - transform_params.scale_min) * random.uniform(0., 1.) + \
-                transform_params.scale_min \
-            if random.uniform(0., 1.) < transform_params.scale_prob else 1.
+                 transform_params.scale_min if random.uniform(0., 1.) < transform_params.scale_prob else 1.
 
-        x_offset = int(random.uniform(-1., 1.) * transform_params.center_perterb_max)
+        x_offset = int(random.uniform(-1., 1.) * transform_params.center_perterb_max)  # > 50
         y_offset = int(random.uniform(-1., 1.) * transform_params.center_perterb_max)
 
         return AugmentSelection(flip, tint, degree, (x_offset, y_offset), scale)
@@ -56,7 +55,7 @@ class AugmentSelection:
         # https://github.com/anatolix/keras_Realtime_Multi-Person_Pose_Estimation/blob/master/py_rmpe_server/py_rmpe_transformer.py
         # This mean we will scale picture so height of person always will be 0.6 of picture.
         # After it we apply random scaling (self.scale) from 0.6 to 1.1
-         (width, height) = center
+        (width, height) = center
         center_x = width
         center_y = height
 
@@ -95,7 +94,7 @@ class Transformer:
         self.config = config
 
     @staticmethod  # staticmethod支持类对象或者类的实例对方法的调用
-    def distort_color(img):
+    def distort_color(img):  # TOCHECK: use more different color spaces
         # uint8 input，opencv outputs Hue、Saturation、Value ranges are: [0,180)，[0,256)，[0,256)
         hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.int16)
         hsv_img[:, :, 0] = np.maximum(np.minimum(hsv_img[:, :, 0] - 10 + np.random.randint(20 + 1), 179),
@@ -121,7 +120,7 @@ class Transformer:
 
         # warp picture and mask
         assert meta['scale_provided'][0] != 0, "************ scale_proviede is zero, dividing zero! ***********"
-
+        # > `objpos`: person center(x,y), `scale_provided`: bbox / img_size
         M, scale_size = aug.affine(meta['objpos'][0], meta['scale_provided'][0], self.config)
         # 根据排名第一的main person进行图像缩放
         # need to understand this,
@@ -129,24 +128,24 @@ class Transformer:
         # print(img.shape)
 
         # 变换之后还会缩放到config.height大小, (self.config.height, self.config.width)　指定的是返回图像的尺寸
-        img = cv2.warpAffine(img, M, (self.config.height, self.config.width), flags=cv2.INTER_LINEAR,
-                             borderMode=cv2.BORDER_CONSTANT, borderValue=(124, 127, 127))
+        img = cv2.warpAffine(img, M, (self.config.height, self.config.width),
+                             flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(124, 127, 127))
         # for debug, see the transformed data
         # plt.imshow(img[:,:,[2,1,0]])  # opencv imread ---> BGR order
         # plt.show()
 
         # mask也要做一致的变换  FIXME: resize插值算法改成三次立方
-        mask_miss = cv2.warpAffine(mask_miss, M, (self.config.height, self.config.width), flags=cv2.INTER_LINEAR,
-                              borderMode=cv2.BORDER_CONSTANT, borderValue=255)  # cv2.INTER_CUBIC适合放大
+        mask_miss = cv2.warpAffine(mask_miss, M, (self.config.height, self.config.width),
+                                   flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=255)  # cv2.INTER_CUBIC适合放大
 
         mask_miss = cv2.resize(mask_miss, self.config.mask_shape,     # mask shape　是统一的 46*46
-                          interpolation=cv2.INTER_AREA)
+                               interpolation=cv2.INTER_AREA)
 
-        mask_all = cv2.warpAffine(mask_all, M, (self.config.height, self.config.width), flags=cv2.INTER_LINEAR,
-                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        mask_all = cv2.warpAffine(mask_all, M, (self.config.height, self.config.width),
+                                  flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         #
         mask_all = cv2.resize(mask_all, self.config.mask_shape,    # mask shape　是统一的 46*46
-                          interpolation=cv2.INTER_AREA)
+                              interpolation=cv2.INTER_AREA)
 
         # # debug usage: show the image and corresponding mask area
         # # mask areas are in dark when display

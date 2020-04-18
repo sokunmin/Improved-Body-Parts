@@ -7,44 +7,45 @@ import cv2
 
 class Heatmapper:
     """
-    It can generate the keypoint heatmaps, body part heatmap, offset feature maps in development.
+    It can generate the `keypoint heatmaps`, `body part heatmap`, `offset feature maps `in development.
     """
-    # 输入图片的尺寸处理
+    # TOCHECK: 输入图片的尺寸处理
     # 训练时需要相同大小的图片才能组成一个batch，在openpose中有两种做法：
-    # 一是直接resize到指定大小的尺寸;
-    # 二是源码提供了一种稍微有特色的做法:　
-    # 先指定长和宽x，y。然后将图片的长 / 宽和x / y比较，看是否大于1
-    # 然后，选择长一些的边（长 > x?, 宽 > y?)，固定长宽比缩放到给定尺寸
-    # 再然后，为另一条边加padding，两边加相同的padding
-    # 最后，resize到指定大小。
+    # (1)是直接resize到指定大小的尺寸;
+    # (2)是源码提供了一种稍微有特色的做法:　
+    #   先指定长和宽x，y。然后将图片的长 / 宽和x / y比较，看是否大于1
+    #   然后，选择长一些的边（长 > x?, 宽 > y?)，固定长宽比缩放到给定尺寸
+    #   再然后，为另一条边加padding，两边加相同的padding
+    #   最后，resize到指定大小。
 
     def __init__(self, config):
 
         self.config = config
-        self.sigma = config.transform_params.sigma
-        self.paf_sigma = config.transform_params.paf_sigma
-        self.double_sigma2 = 2 * self.sigma * self.sigma
+        self.sigma = config.transform_params.sigma  # > σ_k: 9
+        self.paf_sigma = config.transform_params.paf_sigma  # > σ_p: 7
+        self.double_sigma2 = 2 * self.sigma * self.sigma  # > 2*σ^2 = 162
         # set responses lower than gaussian_thre to 0
-        self.keypoint_gaussian_thre = config.transform_params.keypoint_gaussian_thre
+        self.keypoint_gaussian_thre = config.transform_params.keypoint_gaussian_thre  # > 0.015
         self.limb_gaussian_thre = config.transform_params.limb_gaussian_thre
-        self.gaussian_size = ceil((sqrt(-self.double_sigma2 * log(self.keypoint_gaussian_thre))) / config.stride) * 2
-        self.offset_size = self.gaussian_size // 2 + 1  # + 1  # offset vector range
-        self.thre = config.transform_params.paf_thre
+        self.gaussian_size = ceil((sqrt(-self.double_sigma2 * log(self.keypoint_gaussian_thre))) / config.stride) * 2  # TOCHECK: 14
+        self.offset_size = self.gaussian_size // 2 + 1  # + 1  # offset vector range TOCHECK: 8
+        self.thre = config.transform_params.paf_thre  # > 4
 
         # cached common parameters which same for all iterations and all pictures
-        stride = self.config.stride
-        width = self.config.width // stride
-        height = self.config.height // stride
+        stride = self.config.stride  # > 4
+        width = self.config.width // stride  # > 512 // 4 = 128
+        height = self.config.height // stride  # > 512 // 4 = 128
 
-        # x, y coordinates of centers of bigger grid, stride / 2 -0.5是为了在计算响应图时，使用grid的中心
-        self.grid_x = np.arange(width) * stride + stride / 2 - 0.5  # x -> width
-        self.grid_y = np.arange(height) * stride + stride / 2 - 0.5  # y -> height
+        # x, y coordinates of centers of bigger grid, `stride / 2 - 0.5`: 是为了在计算响应图时，使用grid的中心
+        self.grid_x = np.arange(width) * stride + stride / 2 - 0.5  # x -> width: len=128
+        self.grid_y = np.arange(height) * stride + stride / 2 - 0.5  # y -> height: len=128
 
-        # x ,y indexes (type: int) of heatmap feature maps
-        self.Y, self.X = np.mgrid[0:self.config.height:stride, 0:self.config.width:stride]
+        # x ,y indexes (type: int) of heatmap feature maps, stride: 4
+        self.Y, self.X = np.mgrid[0: self.config.height: stride,  # > [0,4,8,...,508]
+                                  0: self.config.width: stride]  # > [0,4,8,...,508]
         # 对<numpy.lib.index_tricks.MGridClass object> slice操作，比如L[:10:2]前10个数，每隔两个取一个
         # # basically we should use center of grid, but in this place classic implementation uses left-top point.
-        self.X = self.X + stride / 2 - 0.5
+        self.X = self.X + stride / 2 - 0.5  # > TOCHECK: why doing this?
         self.Y = self.Y + stride / 2 - 0.5
 
     def create_heatmaps(self, joints,  mask_all):  # 图像根据每个main person都被处理成了固定的大小尺寸，因此heatmap也是固定大小了

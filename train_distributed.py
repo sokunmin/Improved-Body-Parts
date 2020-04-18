@@ -13,7 +13,6 @@ from config.config import GetConfig, COCOSourceConfig, TrainingOpt
 from data.mydataset import MyDataset
 from torch.utils.data.dataloader import DataLoader
 from models.posenet import Network
-from models.loss_model import MultiTaskLoss
 import warnings
 
 try:
@@ -28,7 +27,7 @@ except ImportError:
 warnings.filterwarnings("ignore")
 
 parser = argparse.ArgumentParser(description='PoseNet Training')
-parser.add_argument('--resume', '-r', action='store_true', default=True, help='resume from checkpoint')
+parser.add_argument('--resume', '-r', action='store_true', default=False, help='resume from checkpoint')
 parser.add_argument('--freeze', action='store_true', default=False,
                     help='freeze the pre-trained layers before output layers')
 parser.add_argument('--warmup', action='store_true', default=True, help='using warm-up learning rate')
@@ -45,19 +44,19 @@ parser.add_argument('--keep-batchnorm-fp32', type=str, default=None)
 parser.add_argument('--loss-scale', type=str, default=None)  # '1.0'
 parser.add_argument('--print-freq', '-f', default=10, type=int, metavar='N', help='print frequency (default: 10)')
 
+args = parser.parse_args()
 # ##############################################################################################################
 # ###################################  Setup for some configurations ###########################################
 # ##############################################################################################################
-
-torch.backends.cudnn.benchmark = True  # 如果我们每次训练的输入数据的size不变，那么开启这个就会加快我们的训练速度
+# 如果我们每次训练的输入数据的size不变，那么开启这个就会加快我们的训练速度
+torch.backends.cudnn.benchmark = True
 use_cuda = torch.cuda.is_available()
-
-args = parser.parse_args()
-
 checkpoint_path = args.checkpoint_path
+
+# > TOCHECK: training configs
 opt = TrainingOpt()
 config = GetConfig(opt.config_name)
-soureconfig = COCOSourceConfig(opt.hdf5_train_data)
+soureconfig = COCOSourceConfig(opt.hdf5_train_data)  # > 512.h5
 train_data = MyDataset(config, soureconfig, shuffle=False, augment=True)  # shuffle in data loader
 
 soureconfig_val = COCOSourceConfig(opt.hdf5_val_data)
@@ -73,8 +72,8 @@ if 'WORLD_SIZE' in os.environ:
 args.gpu = 0
 args.world_size = 1
 
-# FOR DISTRIBUTED:  If we are running under torch.distributed.launch,
-# the 'WORLD_SIZE' environment variable will also be set automatically.
+# FOR DISTRIBUTED:  If we are running under `torch.distributed.launch`,
+# the `WORLD_SIZE` environment variable will also be set automatically.
 if args.distributed:
     args.gpu = args.local_rank
     torch.cuda.set_device(args.gpu)
@@ -199,28 +198,37 @@ if args.resume:
 train_sampler = None
 val_sampler = None
 # Restricts data loading to a subset of the dataset exclusive to the current process
-# Create DistributedSampler to handle distributing the dataset across nodes when training 创建分布式采样器来控制训练中节点间的数据分发
-# This can only be called after distributed.init_process_group is called 这个只能在 distributed.init_process_group 被调用后调用
+
+# 创建分布式采样器来控制训练中节点间的数据分发
+# Create `DistributedSampler` to handle distributing the dataset across nodes when training
+
+# 这个只能在 `distributed.init_process_group` 被调用后调用
+# This can only be called after `distributed.init_process_group` is called
+
 # 这个对象控制进入分布式环境的数据集以确保模型不是对同一个子数据集训练，以达到训练目标。
 if args.distributed:
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_data)
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_data)
 
 # 创建数据加载器，在训练和验证步骤中喂数据
-train_loader = torch.utils.data.DataLoader(train_data, batch_size=opt.batch_size, shuffle=(train_sampler is None),
-                                           num_workers=2, pin_memory=True, sampler=train_sampler, drop_last=True)
-val_loader = torch.utils.data.DataLoader(val_data, batch_size=opt.batch_size, shuffle=False,
-                                         num_workers=2, pin_memory=True, sampler=val_sampler, drop_last=True)
+train_loader = DataLoader(train_data,
+                          batch_size=opt.batch_size,  # > 4
+                          shuffle=(train_sampler is None),  # shuffle: (distributed == True)
+                          num_workers=2,
+                          pin_memory=True,
+                          sampler=train_sampler, drop_last=True)
+val_loader = DataLoader(val_data,
+                        batch_size=opt.batch_size,
+                        shuffle=False,
+                        num_workers=2,
+                        pin_memory=True,
+                        sampler=val_sampler,
+                        drop_last=True)
 
 for param in model.parameters():
     if param.requires_grad:
         print('Parameters of network: Autograd')
         break
-
-
-# #  Update the learning rate for start_epoch times
-# for i in range(start_epoch):
-#     scheduler.step()
 
 
 def train(epoch):
@@ -240,15 +248,21 @@ def train(epoch):
     end = time.time()
 
     for batch_idx, target_tuple in enumerate(train_loader):
-        # # ##############  Use schedule step or fun of 'adjust learning rate' #####################
+        # ###############  Use schedule step or fun of 'adjust learning rate' #####################
         adjust_learning_rate(optimizer, epoch, batch_idx, len(train_loader), use_warmup=args.warmup)
         # print('\nLearning rate at this epoch is: %0.9f\n' % optimizer.param_groups[0]['lr'])  # scheduler.get_lr()[0]
+
         # # ##########################################################
         if use_cuda:
             #  这允许异步 GPU 复制数据也就是说计算和数据传输可以同时进.
             target_tuple = [target_tensor.cuda(non_blocking=True) for target_tensor in target_tuple]
 
-        # target tensor shape: [8,512,512,3], [8, 1, 128,128], [8,43,128,128], [8,36,128,128], [8,36,128,128]
+        # target tensor shape:
+        #   [8, 512, 512,   3],
+        #   [8,   1, 128, 128],
+        #   [8,  43, 128, 128],
+        #   [8,  36, 128, 128],
+        #   [8,  36, 128, 128]
         images, mask_misses, heatmaps = target_tuple  # , offsets, mask_offsets
         # images = Variable(images)
         # loc_targets = Variable(loc_targets)

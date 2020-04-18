@@ -20,46 +20,42 @@ warnings.filterwarnings("ignore")
 torch.cuda.empty_cache()
 
 parser = argparse.ArgumentParser(description='PoseNet Training')
-parser.add_argument('--resume', '-r', action='store_true', default=False, help='resume from checkpoint')
-parser.add_argument('--checkpoint_path', '-p',  default='checkpoints_parallel', help='save path')
+parser.add_argument('--resume', '-r', action='store_true', default=True, help='resume from checkpoint')
+parser.add_argument('--checkpoint_path', '-p',  default='link2checkpoints_parallel', help='save path')
 parser.add_argument('--max_grad_norm', default=5, type=float,
     help="If the norm of the gradient vector exceeds this, re-normalize it to have the norm equal to max_grad_norm")
 
 args = parser.parse_args()
 
-torch.backends.cudnn.benchmark = True  # 如果我们每次训练的输入数据的size不变，那么开启这个就会加快我们的训练速度
-# torch.backends.cudnn.deterministic = True
+# 如果我们每次训练的输入数据的size不变，那么开启这个就会加快我们的训练速度
+torch.backends.cudnn.benchmark = True
+use_cuda = torch.cuda.is_available()  # 判断GPU cuda是否可用
 
 checkpoint_path = args.checkpoint_path
 opt = TrainingOpt()
 config = GetConfig(opt.config_name)
 soureconfig = COCOSourceConfig(opt.hdf5_train_data)
 train_data = MyDataset(config, soureconfig, shuffle=False, augment=True)  # shuffle in data loader
-train_loader = DataLoader(train_data, batch_size=opt.batch_size, shuffle=True, drop_last=True, num_workers=16,
-                          pin_memory=True)  # num_workers is tuned according to project, too big or small is not good.
 
 soureconfig_val = COCOSourceConfig(opt.hdf5_val_data)
 val_data = MyDataset(config, soureconfig_val, shuffle=False, augment=True)  # shuffle in data loader
-val_loader = DataLoader(val_data, batch_size=opt.batch_size, shuffle=True, drop_last=True, num_workers=16,
-                        pin_memory=True)  # num_workers is tuned according to project, too big or small is not good.
 
-# # ############# for debug  ###################
-# if __name__ == '__main__':
-#     t0 = time.time()
-#     count = 0
-#     print(torch.cuda.get_device_name(0))
-#     torch.backends.cudnn.benchmark = True
-#     for epoch in range(20):
-#         for bath_id, data_dict in enumerate(train_loader):
-#
-#             t = data_dict[0].cuda(non_blocking=True)  # , non_blocking=True
-#             count += opt.batch_size
-#             print(bath_id, ' of ', epoch)
-#             if count > 50:
-#                 break
-#     print('**************** ', count / (time.time() - t0))
+# num_workers is tuned according to project, too big or small is not good.
+train_loader = DataLoader(train_data,
+                          batch_size=opt.batch_size,
+                          shuffle=True,
+                          num_workers=16,
+                          pin_memory=True,
+                          drop_last=True)
 
-use_cuda = torch.cuda.is_available()  # 判断GPU cuda是否可用
+val_loader = DataLoader(val_data,
+                        batch_size=opt.batch_size,
+                        shuffle=True,
+                        num_workers=16,
+                        pin_memory=True,
+                        drop_last=True)
+
+
 best_loss = float('inf')
 start_epoch = 0  # 从0开始或者从上一个epoch开始
 
@@ -112,6 +108,7 @@ scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1, l
 for i in range(start_epoch):
     #  update the learning rate for start_epoch times
     scheduler.step()
+
 
 for param in posenet.parameters():
     if param.requires_grad:
@@ -182,7 +179,7 @@ def train(epoch):
 
 
 def test(epoch, show_image=False):
-    print('\nTest phase, Epoch: {}'.format(epoch))
+    print('\n ############################# Test phase, Epoch: {} #############################'.format(epoch))
     posenet.eval()
     with torch.no_grad():  # will save gpu memory and speed up
         test_loss = 0
@@ -230,3 +227,19 @@ if __name__ == '__main__':
         train(epoch)
         # test(epoch, show_image=True)
 
+
+# # ############# for debug  ###################
+# if __name__ == '__main__':
+#     t0 = time.time()
+#     count = 0
+#     print(torch.cuda.get_device_name(0))
+#     torch.backends.cudnn.benchmark = True
+#     for epoch in range(20):
+#         for bath_id, data_dict in enumerate(train_loader):
+#
+#             t = data_dict[0].cuda(non_blocking=True)  # , non_blocking=True
+#             count += opt.batch_size
+#             print(bath_id, ' of ', epoch)
+#             if count > 50:
+#                 break
+#     print('**************** ', count / (time.time() - t0))

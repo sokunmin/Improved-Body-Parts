@@ -162,9 +162,9 @@ class Backbone(nn.Module):
     """
     def __init__(self, nFeat=256, inplanes=3, resBlock=Residual, dilatedBlock=DilatedConv):
         super(Backbone, self).__init__()
-        self.nFeat = nFeat
+        self.nFeat = nFeat  # > 256
         self.resBlock = resBlock
-        self.inplanes = inplanes
+        self.inplanes = inplanes  # > 3
         self.conv1 = nn.Conv2d(self.inplanes, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.LeakyReLU(negative_slope=0.01, inplace=True)
@@ -212,24 +212,26 @@ class Hourglass(nn.Module):
 
     def _make_single_residual(self, depth_id):
         # the innermost conve layer, return as a layer item
-        return self.resBlock(self.nFeat + self.increase * (depth_id + 1), self.nFeat + self.increase * (depth_id + 1),
-                             bn=self.bn)                            # ###########  Index: 4
+        return self.resBlock(self.nFeat + self.increase * (depth_id + 1),
+                             self.nFeat + self.increase * (depth_id + 1),
+                             bn=self.bn)  # Index: 4
 
     def _make_lower_residual(self, depth_id):
-        # return as a list
-        pack_layers = [self.resBlock(self.nFeat + self.increase * depth_id, self.nFeat + self.increase * depth_id,
-                                     bn=self.bn),                                     # ######### Index: 0
-                       self.resBlock(self.nFeat + self.increase * depth_id, self.nFeat + self.increase * (depth_id + 1),
-                                                                                                  # ######### Index: 1
-                                     bn=self.bn),
-                       self.resBlock(self.nFeat + self.increase * (depth_id + 1), self.nFeat + self.increase * depth_id,
-                                                                                                   # ######### Index: 2
-                                     bn=self.bn),
-                       self.convBlock(self.nFeat + self.increase * depth_id, self.nFeat + self.increase * depth_id,
-                                     # ######### Index: 3
-                                     bn=self.bn),  # 添加一个Conv精细化上采样的特征图?
+        # [0]: 256, [1]: 384, [2], [3]
+        pack_layers = [self.resBlock(self.nFeat + self.increase * depth_id,
+                                     self.nFeat + self.increase * depth_id,
+                                     bn=self.bn),  # Index: 0
+                       self.resBlock(self.nFeat + self.increase * depth_id,
+                                     self.nFeat + self.increase * (depth_id + 1),
+                                     bn=self.bn),  # Index: 1
+                       self.resBlock(self.nFeat + self.increase * (depth_id + 1),
+                                     self.nFeat + self.increase * depth_id,
+                                     bn=self.bn),  # Index: 2
+                       self.convBlock(self.nFeat + self.increase * depth_id,
+                                      self.nFeat + self.increase * depth_id,
+                                      bn=self.bn),  # Index: 3  添加一个Conv精细化上采样的特征图?
                        ]
-        return pack_layers
+        return pack_layers  # -> list
 
     def _make_hour_glass(self):
         """
@@ -237,7 +239,7 @@ class Hourglass(nn.Module):
         :return: conve layers packed in n hourglass blocks
         """
         hg = []
-        for i in range(self.depth):
+        for i in range(self.depth):  # 4
             #  skip path; up_residual_block; down_residual_block_path,
             # 0 ~ n-2 (except the outermost n-1 order) need 3 residual blocks
             res = self._make_lower_residual(i)  # type:list

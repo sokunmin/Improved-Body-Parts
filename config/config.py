@@ -9,8 +9,8 @@ class TrainingOpt:
     batch_size = 4  # for single process 整个分布式模型总的 batch size 是 batch_size*world_size
     learning_rate = 2.5e-5  # 2.5e-5  # 1e-4  # 2.5e-4  for single process 整个分布式模型总的是learning_rate*world_size
     config_name = "Canonical"
-    hdf5_train_data = "./data/dataset/coco/link2coco2017/coco_train_dataset512.h5"  # 不使用验证集上的数据
-    hdf5_val_data = "./data/dataset/coco/link2coco2017/coco_val_dataset512.h5"
+    hdf5_train_data = "./data/dataset/coco/coco_train_dataset512.h5"  # 不使用验证集上的数据
+    hdf5_val_data = "./data/dataset/coco/coco_val_dataset512.h5"
     nstack = 4  # stacked number of hourglass
     hourglass_inp_dim = 256
     increase = 128  # increased channels once down-sampling in the hourglass networks
@@ -36,7 +36,7 @@ class TransformationParams:
         self.max_rotate_degree = 40.  # 40 todo: 看看hourglass中512设置的偏移
         self.center_perterb_max = 50.  # shift augmentation
         self.flip_prob = 0.5  # flip the image to force the network distinguish the mirror symmetrical keypoints
-        self.tint_prob = 0.2  # ting着色操作比较耗时，如果按照0.5的概率进行，可能会使得每秒数据扩充图片减少10张
+        self.tint_prob = 0.2  # tint着色操作比较耗时，如果按照0.5的概率进行，可能会使得每秒数据扩充图片减少10张
         self.sigma = 9  # 7 当是512输入时是9
         self.keypoint_gaussian_thre = 0.015  # 低于此值的keypoint gt高斯响应的区域被置零
         self.limb_gaussian_thre = 0.015  # 0.03  # 0.1  # 低于此值的body part gt高斯响应的区域被置零
@@ -58,56 +58,86 @@ class CanonicalConfig:
         self.stride = 4  # 用于计算网络输出的feature map的尺寸
         # self.img_mean = [0.485, 0.456, 0.406]  # RGB format mean and standard variance
         # self.img_std = [0.229, 0.224, 0.225]
-        self.parts = ["nose", "neck", "Rsho", "Relb", "Rwri", "Lsho", "Lelb", "Lwri", "Rhip", "Rkne", "Rank",
+        self.parts = ["nose", "neck", "Rsho", "Relb", "Rwri",
+                      "Lsho", "Lelb", "Lwri", "Rhip", "Rkne", "Rank",
                       "Lhip", "Lkne", "Lank", "Reye", "Leye", "Rear", "Lear"]  # , "navel"
 
-        self.num_parts = len(self.parts)
+        self.num_parts = len(self.parts)  # > 18
         self.parts_dict = dict(zip(self.parts, range(self.num_parts)))
         # help the network to detect body parts
         self.parts += ["background"]  # person mask作为背景之一, global config index: 42
         # force the network to learn to distinguish the keypoints from background
-        self.parts += ['reverseKeypoint']  # 对所有keypoints取反作为背景二, global config index: 43
+        self.parts += ['reverseKeypoint']  # TOCHECK: 对所有keypoints取反作为背景二, global config index: 43
         self.num_parts_with_background = len(self.parts)
         self.leftParts, self.rightParts = CanonicalConfig.ltr_parts(self.parts_dict)
 
         # this numbers probably copied from matlab they are 1.. based not 0.. based
-        self.limb_from = ['neck', 'neck', 'neck', 'neck', 'neck', 'nose', 'nose', 'Reye', 'Leye', 'neck', 'Rsho',
-                          'Relb', 'neck', 'Lsho', 'Lelb',
-                          'neck', 'Rhip', 'Rkne', 'neck', 'Lhip', 'Lkne',
-                          'nose', 'nose', 'Rsho', 'Rhip', 'Lsho', 'Lhip', 'Rear', 'Lear', 'Rhip']
+        self.limb_from = ['neck',  # [0]            neck -> nose
+                          'neck',  # [1]            neck -> right eye
+                          'neck',  # [2]            neck -> left eye
+                          'neck',  # [3]            neck -> right ear
+                          'neck',  # [4]            neck -> left ear
+                          'nose',  # [5]            nose -> right eye
+                          'nose',  # [6]            nose -> left eye
+                          'Reye',  # [7]       right eye -> right ear
+                          'Leye',  # [8]        left eye -> left ear
+                          'neck',  # [9]            neck -> right shoulder
+                          'Rsho',  # [10] right shoulder -> right elbow
+                          'Relb',  # [11]    right elbow -> right wrist
+                          'neck',  # [12]           neck -> left shoulder
+                          'Lsho',  # [13]  left shoulder -> left elbow
+                          'Lelb',  # [14]     left elbow -> left wrist
+                          'neck',  # [15]           neck -> right hip
+                          'Rhip',  # [16]      right hip -> right knee
+                          'Rkne',  # [17]     right knee -> right ankle
+                          'neck',  # [18]           neck -> left hip
+                          'Lhip',  # [19]        left hip-> left knee
+                          'Lkne',  # [20]      left knee -> left ankle
+                          'nose',  # [21]           nose -> right shoulder
+                          'nose',  # [22]           nose -> left shoulder
+                          'Rsho',  # [23] right shoulder -> right hip
+                          'Rhip',  # [24]      right hip -> left knee
+                          'Lsho',  # [25]  left shoulder -> left hip
+                          'Lhip',  # [26]       left hip -> right knee
+                          'Rear',  # [27]      right ear -> right shoulder
+                          'Lear',  # [28]       left ear -> left shoulder
+                          'Rhip']  # [29]      right hip -> left hip
 
-        self.limb_to = ['nose', 'Reye', 'Leye', 'Rear', 'Lear', 'Reye', 'Leye', 'Rear', 'Lear', 'Rsho', 'Relb', 'Rwri',
-                        'Lsho', 'Lelb', 'Lwri',
-                        'Rhip', 'Rkne', 'Rank', 'Lhip', 'Lkne', 'Lank',
-                        'Rsho', 'Lsho', 'Rhip', 'Lkne', 'Lhip', 'Rkne', 'Rsho', 'Lsho', 'Lhip']
+        self.limb_to = ['nose', 'Reye', 'Leye', 'Rear', 'Lear', 'Reye',
+                        'Leye', 'Rear', 'Lear', 'Rsho', 'Relb', 'Rwri',
+                        'Lsho', 'Lelb', 'Lwri', 'Rhip', 'Rkne', 'Rank',
+                        'Lhip', 'Lkne', 'Lank', 'Rsho', 'Lsho', 'Rhip',
+                        'Lkne', 'Lhip', 'Rkne', 'Rsho', 'Lsho', 'Lhip']
 
         self.limb_from = [self.parts_dict[n] for n in self.limb_from]
         self.limb_to = [self.parts_dict[n] for n in self.limb_to]
 
-        assert self.limb_from == [x for x in
-                                  [1, 1, 1, 1, 1, 0, 0, 14, 15, 1, 2, 3, 1, 5, 6, 1, 8, 9, 1, 11, 12,
-                                   0, 0, 2, 8, 5, 11, 16, 17, 8]]
-        assert self.limb_to == [x for x in
-                                [0, 14, 15, 16, 17, 14, 15, 16, 17, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-                                 2, 5, 8, 12, 11, 9, 2, 5, 11]]
+        assert self.limb_from == \
+               [x for x in[1, 1, 1, 1, 1, 0, 0, 14, 15, 1,
+                           2, 3, 1, 5, 6, 1, 8, 9, 1, 11, 12,
+                           0, 0, 2, 8, 5, 11, 16, 17, 8]]
+        assert self.limb_to == \
+               [x for x in [0, 14, 15, 16, 17, 14, 15, 16, 17,
+                            2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+                            2, 5, 8, 12, 11, 9, 2, 5, 11]]
 
         self.limbs_conn = list(zip(self.limb_from, self.limb_to))
 
-        self.paf_layers = len(self.limbs_conn)
-        self.heat_layers = self.num_parts
+        self.paf_layers = len(self.limbs_conn)  # > 30
+        self.heat_layers = self.num_parts  # > 18 (no bg)
         # layers of keypoint and body part heatmaps PLUS ++ 2 background
         self.num_layers = self.paf_layers + self.heat_layers + 2
-
+        # > [0-29]: paf, [30-47]: heatmap, [48-]: bg
         self.paf_start = 0
         self.heat_start = self.paf_layers  # Notice: 此处channel安排上，paf_map在前，heat_map在后
         self.bkg_start = self.paf_layers + self.heat_layers  # 用于feature map的计数,2个background的起始点
 
         self.offset_layers = 2  # * self.num_parts # 选择使用所有的关节点共用 x-offset 和 y-offset
-        self.offset_start = self.num_layers
-
-        self.mask_shape = (self.height // self.stride, self.width // self.stride)  # 46, 46
-        self.parts_shape = (self.height // self.stride, self.width // self.stride, self.num_layers)  # 46, 46, 59
-        self.offset_shape = (self.height // self.stride, self.width // self.stride, self.offset_layers)
+        self.offset_start = self.num_layers  # > [50-]
+        # > 512 // 4 = 128
+        self.mask_shape = (self.height // self.stride, self.width // self.stride)  # (128, 128)
+        self.parts_shape = (self.height // self.stride, self.width // self.stride, self.num_layers)  # (128, 128, 50)
+        self.offset_shape = (self.height // self.stride, self.width // self.stride, self.offset_layers) # (128, 128, 2)
 
         self.transform_params = TransformationParams(self.stride)
 
@@ -150,7 +180,7 @@ class COCOSourceConfig:
         self.num_parts = len(self.parts)
 
         # for COCO neck is calculated like mean of 2 shoulders.
-        self.parts_dict = dict(zip(self.parts, range(self.num_parts)))
+        self.parts_dict = dict(zip(self.parts, range(self.num_parts)))  # coco_cat2id
 
     def convert(self, meta, global_config):
         """Convert COCO configuration (joint annotation) into ours configuration of this project"""
@@ -158,66 +188,65 @@ class COCOSourceConfig:
         # ---将coco config中对数据的定义改成CMU项目中的格式---
         # ----------------------------------------------
 
-        joints = np.array(meta['joints'])
-
-        assert joints.shape[1] == len(self.parts)
-
-        result = np.zeros((joints.shape[0], global_config.num_parts, 3))
+        joints = np.array(meta['joints'])  # > (#obj, 17, (x,y,v)))
+        num_obj, num_kp, _ = joints.shape
+        assert num_kp == len(self.parts)  # > 17
         # result是一个三维数组，shape[0]和人数有关，每一行即shape[1]和关节点数目有关，最后一维度长度为3,分别是x,y,v,即坐标值和可见标志位
-        result[:, :, 2] = 3.
+        result = np.zeros((num_obj, global_config.num_parts, 3))  # > `num_parts`: 18 -> (#obj, 18, 3)
+
+        result[:, :, 2] = 3.  # > `0` -> `3`, `0=labeled and invisible` in CMU
         # OURS - # 3 never marked up in this dataset, 2 - not marked up in this person, 1 - marked and visible,
         # 0 - marked but invisible. 关于visible值的重新定义在coco_mask_hdf5.py中完成了
+        # > TOCHECK: use coco kp order + cmu neck
+        for p in self.parts:  # > 17
+            coco_id = self.parts_dict[p]  # > coco cat2id, e.g. nose=0
 
-        for p in self.parts:
-            coco_id = self.parts_dict[p]
-
-            if p in global_config.parts_dict:
-                global_id = global_config.parts_dict[p]  # global_id是在该项目中使用的关节点编号，因为额外加入了neck(navel?)，与原始coco数据集中定义不同
-                assert global_id != 1, "neck shouldn't be known yet"
+            if p in global_config.parts_dict:  # > CMU cat2id
+                cmu_id = global_config.parts_dict[p]  # global_id是在该项目中使用的关节点编号，因为额外加入了neck(navel?)，与原始coco数据集中定义不同
+                assert cmu_id != 1, "neck shouldn't be known yet"
                 # assert global_id != 2, "navel shouldn't be known yet"
-                result[:, global_id, :] = joints[:, coco_id, :]
+                result[:, cmu_id, :] = joints[:, coco_id, :]
 
         if 'neck' in global_config.parts_dict:  # neck point works as a root note
-            neckG = global_config.parts_dict['neck']
+            neck_id = global_config.parts_dict['neck']
             # parts_dict['neck']　＝　１, parts_dict是前面定义过的字典类型，节点名称：序号
-            RshoC = self.parts_dict['Rsho']
-            LshoC = self.parts_dict['Lsho']
+            coco_Rsho_id = self.parts_dict['Rsho']  # > coco cat2id
+            coco_Lsho_id = self.parts_dict['Lsho']
 
             # no neck in coco database, we calculate it as average of shoulders
             #  here, we use 0 - hidden, 1 visible, 2 absent to represent the visibility of keypoints
             #  - it is not the same as coco values they processed by generate_hdf5
 
-            # -------------------------------原始coco关于visible标签的定义－－－－－－－－－--------------－－－－－－－－－#
+            # -------------------------------原始`coco`关于visible标签的定义－－－－－－－－－--------------－－－－－－－－－#
             # 第三个元素是个标志位v，v为0时表示这个关键点没有标注（这种情况下x = y = v = 0），
             # v为1时表示这个关键点标注了但是不可见（被遮挡了），v为2时表示这个关键点标注了同时也可见。
             # ------------------------------------ ----------------------------　－－－－－－－－－－－－－－－－－－－－－#
-
-            both_shoulders_known = (joints[:, LshoC, 2] < 2) & (joints[:, RshoC, 2] < 2)  # 按位运算
+            # > `joints`: (#obj, 17, 3), CMU = `0`: labeled & invisible, `1`: labeled & visible, `2`: not labeled
+            both_shoulders_known = (joints[:, coco_Lsho_id, 2] < 2) & (joints[:, coco_Rsho_id, 2] < 2)  # 按位运算 -> (#obj,)
             # 用True和False作为索引
-            result[~both_shoulders_known, neckG, 2] = 2.  # otherwise they will be 3. aka 'never marked in this dataset'
+            result[~both_shoulders_known, neck_id, 2] = 2.  # otherwise they will be 3. aka 'never marked in this dataset'
             # ~both_shoulders_known bool类型按位取反
-            result[both_shoulders_known, neckG, 0:2] = (joints[both_shoulders_known, RshoC, 0:2] +
-                                                        joints[both_shoulders_known, LshoC, 0:2]) / 2
-            result[both_shoulders_known, neckG, 2] = np.minimum(joints[both_shoulders_known, RshoC, 2],
-                                                                joints[both_shoulders_known, LshoC, 2])
-            # 最后一位是 visible　标志位，如果两个节点中有任何一个节点不可见，则中间节点neck设为不可见
+            result[both_shoulders_known, neck_id, 0:2] = (joints[both_shoulders_known, coco_Rsho_id, 0:2] +
+                                                          joints[both_shoulders_known, coco_Lsho_id, 0:2]) / 2
+            result[both_shoulders_known, neck_id, 2] = np.minimum(joints[both_shoulders_known, coco_Rsho_id, 2],
+                                                                  joints[both_shoulders_known, coco_Lsho_id, 2])
+            # > NOTE: 最后一位是 visible　标志位，如果两个节点中有任何一个节点不可见，则中间节点neck设为不可见
 
-        if 'navel' in global_config.parts_dict:  # add navel keypoint or not?
-            navelG = global_config.parts_dict['navel']
+        if 'navel' in global_config.parts_dict:  # add `navel` keypoint or not? (肚臍)
+            navel_id = global_config.parts_dict['navel']
             # parts_dict['navel']　＝ 2, parts_dict是前面定义过的字典类型，节点名称：序号
-            RhipC = self.parts_dict['Rhip']
-            LhipC = self.parts_dict['Lhip']
+            coco_Rhip_id = self.parts_dict['Rhip']  # > coco cat2id
+            coco_Lhip_id = self.parts_dict['Lhip']
 
             # no navel in coco database, we calculate it as average of hipulders
-            both_hipulders_known = (joints[:, LhipC, 2] < 2) & (joints[:, RhipC, 2] < 2)  # 按位运算
+            both_hipulders_known = (joints[:, coco_Lhip_id, 2] < 2) & (joints[:, coco_Rhip_id, 2] < 2)  # 按位运算
             # 用True和False作为索引
-            result[
-                ~both_hipulders_known, navelG, 2] = 2.  # otherwise they will be 3. aka 'never marked in this dataset'
+            result[~both_hipulders_known, navel_id, 2] = 2.  # otherwise they will be 3. aka 'never marked in this dataset'
             # ~both_hipulders_known bool类型按位取反
-            result[both_hipulders_known, navelG, 0:2] = (joints[both_hipulders_known, RhipC, 0:2] +
-                                                         joints[both_hipulders_known, LhipC, 0:2]) / 2
-            result[both_hipulders_known, navelG, 2] = np.minimum(joints[both_hipulders_known, RhipC, 2],
-                                                                 joints[both_hipulders_known, LhipC, 2])
+            result[both_hipulders_known, navel_id, 0:2] = (joints[both_hipulders_known, coco_Rhip_id, 0:2] +
+                                                         joints[both_hipulders_known, coco_Lhip_id, 0:2]) / 2
+            result[both_hipulders_known, navel_id, 2] = np.minimum(joints[both_hipulders_known, coco_Rhip_id, 2],
+                                                                 joints[both_hipulders_known, coco_Lhip_id, 2])
 
         meta['joints'] = result
 
@@ -230,7 +259,7 @@ class COCOSourceConfig:
 
     def source(self):
         # return the path
-        return self.hdf5_source
+        return self.hdf5_source  # > train/val_512.h5
 
 
 # more information on keypoints mapping is here
@@ -246,7 +275,7 @@ def GetConfig(config_name):
     dct = config.parts[:]
     dct = [None] * (config.num_layers - len(dct)) + dct
 
-    for (i, (fr, to)) in enumerate(config.limbs_conn):
+    for (i, (fr, to)) in enumerate(config.limbs_conn):  # > #edge: 30
         name = "%s->%s" % (config.parts[fr], config.parts[to])
         print(i, name)
         x = i

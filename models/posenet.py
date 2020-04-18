@@ -52,29 +52,30 @@ class PoseNet(nn.Module):
         :param kwargs:
         """
         super(PoseNet, self).__init__()
-        # self.pre = nn.Sequential(
-        #     Conv(3, 64, 7, 2, bn=bn),
-        #     Conv(64, 128, bn=bn),
-        #     nn.MaxPool2d(2, 2),
-        #     Conv(128, 128, bn=bn),
-        #     Conv(128, inp_dim, bn=bn)
-        # )
-        self.pre = Backbone(nFeat=inp_dim)  # It doesn't affect the results regardless of which self.pre is used
-        self.hourglass = nn.ModuleList([Hourglass(4, inp_dim, increase, bn=bn) for _ in range(nstack)])
-        self.features = nn.ModuleList([Features(inp_dim, increase=increase, bn=bn) for _ in range(nstack)])
+        # <512x512>
+        # nstack: 4
+        # inp_dim: 256
+        # oup_dim: 50
+        # bn: True
+        # increase: 128
+        # init_weights: True
+        self.pre = Backbone(nFeat=inp_dim)  # > 256: It doesn't affect the results regardless of which self.pre is used
+        self.hourglass = nn.ModuleList([Hourglass(depth=4, nFeat=inp_dim, increase=increase, bn=bn) for _ in range(nstack)])
+        self.features = nn.ModuleList([Features(inp_dim=inp_dim, increase=increase, bn=bn) for _ in range(nstack)])
         # predict 5 different scales of heatmpas per stack, keep in mind to pack the list using ModuleList.
         # Notice: nn.ModuleList can only identify Module subclass! Thus, we must pack the inner layers in ModuleList.
         # TODO: change the outs layers, Conv(inp_dim + j * increase, oup_dim, 1, relu=False, bn=False)
         self.outs = nn.ModuleList(
-            [nn.ModuleList([Conv(inp_dim, oup_dim, 1, relu=False, bn=False) for j in range(5)]) for i in
-             range(nstack)])
+            [nn.ModuleList([Conv(inp_dim, oup_dim, 1, relu=False, bn=False)
+                            for j in range(5)]) for i in range(nstack)])
 
         # TODO: change the merge layers, Merge(inp_dim + j * increase, inp_dim + j * increase)
-        self.merge_features = nn.ModuleList(
-            [nn.ModuleList([Merge(inp_dim, inp_dim + j * increase, bn=bn) for j in range(5)]) for i in
-             range(nstack - 1)])
+        self.merge_feats = nn.ModuleList(
+            [nn.ModuleList([Merge(inp_dim, inp_dim + j * increase, bn=bn)
+                            for j in range(5)]) for i in range(nstack - 1)])
         self.merge_preds = nn.ModuleList(
-            [nn.ModuleList([Merge(oup_dim, inp_dim + j * increase, bn=bn) for j in range(5)]) for i in range(nstack - 1)])
+            [nn.ModuleList([Merge(oup_dim, inp_dim + j * increase, bn=bn)
+                            for j in range(5)]) for i in range(nstack - 1)])
         self.nstack = nstack
         if init_weights:
             self._initialize_weights()
@@ -85,13 +86,13 @@ class PoseNet(nn.Module):
         x = self.pre(x)
         pred = []
         # loop over stack
-        for i in range(self.nstack):
+        for i in range(self.nstack):  # > 4
             preds_instack = []
-            # return 5 scales of feature maps
-            hourglass_feature = self.hourglass[i](x)
+            # -> (0:256, 1:384, 2:512, 3:640, 4:786)
+            hourglass_feature = self.hourglass[i](x)  # -> 5 scales of feature maps
 
             if i == 0:  # cache for smaller feature maps produced by hourglass block
-                features_cache = [torch.zeros_like(hourglass_feature[scale]) for scale in range(5)]
+                features_cache = [torch.zeros_like(hourglass_feature[scale_idx]) for scale_idx in range(5)]
 
             else:  # residual connection across stacks
                 #  python里面的+=, ，*=也是in-place operation,需要注意
@@ -103,15 +104,15 @@ class PoseNet(nn.Module):
                 preds_instack.append(self.outs[i][j](features_instack[j]))
                 if i != self.nstack - 1:
                     if j == 0:
-                        x = x + self.merge_preds[i][j](preds_instack[j]) + self.merge_features[i][j](
-                            features_instack[j])  # input tensor for next stack
-                        features_cache[j] = self.merge_preds[i][j](preds_instack[j]) + self.merge_features[i][j](
-                            features_instack[j])
+                        x = x + self.merge_preds[i][j](preds_instack[j]) + \
+                                self.merge_feats[i][j](features_instack[j])  # input tensor for next stack
+                        features_cache[j] = self.merge_preds[i][j](preds_instack[j]) + \
+                                            self.merge_feats[i][j](features_instack[j])
 
                     else:
                         # reset the res caches
-                        features_cache[j] = self.merge_preds[i][j](preds_instack[j]) + self.merge_features[i][j](
-                            features_instack[j])
+                        features_cache[j] = self.merge_preds[i][j](preds_instack[j]) + \
+                                            self.merge_feats[i][j](features_instack[j])
             pred.append(preds_instack)
         # returned list shape: [nstack * [batch*128*128, batch*64*64, batch*32*32, batch*16*16, batch*8*8]]z
         return pred

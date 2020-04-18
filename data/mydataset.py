@@ -19,7 +19,7 @@ class MyDataset(Dataset):
         :param global_config: the configuration used in our project
         :param config:  the original COCO configuration
         :param shuffle:
-        :param augment:
+        :param augment: train=True, val=False
         """
         self.global_config = global_config
         self.config = config

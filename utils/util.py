@@ -176,8 +176,10 @@ class GaussianSmoothing(nn.Module):
 
 def keypoint_heatmap_nms(heat, kernel=3, thre=0.1):
     # keypoint NMS on heatmap (score map)
-    pad = (kernel - 1) // 2
+    pad = (kernel - 1) // 2  # > 1
+    # > `heat`: (1, 18, imgH, imgW) -> (1, 18, imgH+2, imgW+2)
     pad_heat = F.pad(heat, (pad, pad, pad, pad), mode='reflect')
+    # > (1, 18, imgH+2, imgW+2) -> (3x3) maxpool
     hmax = F.max_pool2d(pad_heat, (kernel, kernel), stride=1, padding=0)
     keep = (hmax == heat).float() * (heat >= thre).float()
     return heat * keep
@@ -186,29 +188,29 @@ def keypoint_heatmap_nms(heat, kernel=3, thre=0.1):
 def refine_centroid(scorefmp, anchor, radius):  # TODO: 添加keypoint type的sigma对score做归一化，折合成1.x倍，防止score衰减
     """
     Refine the centroid coordinate. It dose not affect the results after testing.
-    :param scorefmp: 2-D numpy array, original regressed score map
+    :param scorefmp: 2-D numpy array, original regressed score map (imgH, imgW)
     :param anchor: python tuple, (x,y) coordinates
     :param radius: int, range of considered scores
     :return: refined anchor, refined score
     """
 
-    x_c, y_c = anchor
+    x_c, y_c = anchor  # > peak location index
     x_min = x_c - radius
     x_max = x_c + radius + 1
     y_min = y_c - radius
     y_max = y_c + radius + 1
-
+    # > `scorefmp`: (imgH, imgW)
     if y_max > scorefmp.shape[0] or y_min < 0 or x_max > scorefmp.shape[1] or x_min < 0:
-        return anchor + (scorefmp[y_c, x_c], )
-
-    score_box = scorefmp[y_min:y_max, x_min:x_max]
-    x_grid, y_grid = np.mgrid[-radius:radius+1, -radius:radius+1]
-    offset_x = (score_box * x_grid).sum() / score_box.sum()
+        return anchor + (scorefmp[y_c, x_c], )  # TOCHECK: add zero?
+    score_box = scorefmp[y_min:y_max, x_min:x_max]  # > (5, 5)
+    # > `mgrid` vs. `meshgrid`: https://blog.csdn.net/tymatlab/article/details/79027162
+    x_grid, y_grid = np.mgrid[-radius:radius+1, -radius:radius+1]  # > 5x5 matrix weights
+    offset_x = (score_box * x_grid).sum() / score_box.sum()  # > scalar
     offset_y = (score_box * y_grid).sum() / score_box.sum()
     x_refine = x_c + offset_x  # int(np.rint(x_c + offset_x))
-    y_refine = y_c + offset_y  #int(np.rint(y_c + offset_y))
-    refined_anchor = (x_refine, y_refine)
-    return refined_anchor + (score_box.mean(),)
+    y_refine = y_c + offset_y  # int(np.rint(y_c + offset_y))
+    refined_anchor = (x_refine, y_refine)  # > (x,y)
+    return refined_anchor + (score_box.mean(),)  # > (x,y,score)
 
 
 def set_bn_eval_fp32(m):

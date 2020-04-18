@@ -26,19 +26,19 @@ class RawDataIterator:
         self.datum = None
         self.heatmapper = Heatmapper(global_config)  # Heatmapper is a python class
         self.transformer = Transformer(global_config)
-        self.augment = augment
-        self.shuffle = shuffle
+        self.augment = augment  # > train: True
+        self.shuffle = shuffle  # > False
         # datum[0]: <HDF5 group "dataset">, is the annotation file used in our project
         with h5py.File(self.h5file_path, 'r') as file:
             self.keys = list(file['dataset'].keys())
-
+    # > `MyData.__getitem__() -> gen()`
     def gen(self, index):
         # 这个gen()函数是真正生成训练所需的ground truth数据，并且在ds_generators.py中被调用，
         # 在那里数据被复制成多份满足多个stage的输入要求
         if self.shuffle:
             random.shuffle(self.keys)  # shuffle the self.keys
 
-        if self.datum is None:
+        if self.datum is None:  # datum: False, mask: True
             file = h5py.File(self.h5file_path, 'r')
             self.datum = file['datum'] if 'datum' in file \
                 else (file['dataset'], file['images'], file['masks'] if 'masks' in file else None)
@@ -48,10 +48,10 @@ class RawDataIterator:
 
         # transform picture
         assert mask_miss.dtype == np.uint8, "Should be 'np.uint8' type, however %s is given" % mask_miss.dtype
-        # joint annotation (meta['joints']) has already been converted to our format in self.read_data()
-        # transform() will return np.float32 data which is within [0, 1]
-        image, mask_miss, mask_all, meta = self.transformer.transform(image, mask_miss, mask_all, meta,
-                                                        aug=None if self.augment else AugmentSelection.unrandom())
+        # joint annotation `(meta['joints'])` has already been converted to our format in `self.read_data()`
+        # `transform()` will return `np.float32` data which is within `[0, 1]`
+        image, mask_miss, mask_all, meta = self.transformer.transform(
+            image, mask_miss, mask_all, meta, aug=None if self.augment else AugmentSelection.unrandom())
         # 因为在transformer.py中对mask做了立方插值的resize, 且　/225., 所以类型变成了float
         assert mask_miss.dtype == np.float32, mask_miss.dtype
         assert mask_all.dtype == np.float32, mask_all.dtype
@@ -73,9 +73,9 @@ class RawDataIterator:
 
     def read_data(self, key):
 
-        if isinstance(self.datum, (list, tuple)):
+        if isinstance(self.datum, (list, tuple)):  # <-
             dataset, images, masks = self.datum
-            return self.read_data_new(dataset, images, masks, key, self.config)
+            return self.read_data_new(dataset, images, masks, key, self.config)  # > `COCOSourceConfig`
         else:
             return self.read_data_old(self.datum, key, self.config)
 
@@ -113,24 +113,24 @@ class RawDataIterator:
         entry = dataset[key]   # type: h5py.Dataset  # hint trick for pycharm
         assert 'meta' in entry.attrs, "No 'meta' attribute in .h5 file. Did you generate .h5 with new code?"
 
-        meta = json.loads(entry[()])  # entry.value() changes to entry[()] in the new version of  hdf5
+        meta = json.loads(entry[()])  # `entry.value() == entry[()]` in the new version of hdf5
         debug = json.loads(entry.attrs['meta'])
-        meta = config.convert(meta, self.global_config)  # 改变数据定义，以满足CMU工作中的要求
-        img = images[meta['image']][()]
+        meta = config.convert(meta, self.global_config)  # > `COCOSourceConfig`: 改变keypoint数据定义，以满足CMU工作中的要求
+        img = images[meta['image']][()]  # > (W, H, C)
         mask_miss = None
-
-        # if we use imencode in coco_mask_hdf5.py
-        if len(img.shape) == 2 and img.shape[1] == 1:
+        img_w, img_h, img_c = img.shape
+        # if we use imencode in `coco_mask_hdf5.py`, WARN: not used anymore.
+        if len(img.shape) == 2 and img_h == 1:
             img = cv2.imdecode(img, flags=-1)
 
         # if no mask is available, see the image storage operation in coco_mask_hdf5.py, concat image and mask together
-        if img.shape[2] > 3:
+        if img_c > 3:
             mask_miss = img[:, :, 3]
             img = img[:, :, 0:3]
 
         if mask_miss is None:
             if masks is not None:
-                mask_concat = masks[meta['image']][()]  # meta['image'] serves as index
+                mask_concat = masks[meta['image']][()]  # meta['image'] serves as index -> (W, H, (miss, all))
 
                 # if we use imencode in coco_mask_hdf5.py, otherwise skip it
                 # if len(mask_miss.shape) == 2 and mask_miss.shape[1] == 1:

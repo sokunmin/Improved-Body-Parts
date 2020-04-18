@@ -92,7 +92,8 @@ if use_cuda:
     # module.cuda() only move the registered parameters to GPU.
     criterion.cuda()
 
-    torch.backends.cudnn.benchmark = True  # 如果我们每次训练的输入数据的size不变，那么开启这个就会加快我们的训练速度
+    # 如果我们每次训练的输入数据的size不变，那么开启这个就会加快我们的训练速度
+    torch.backends.cudnn.benchmark = True
     # torch.backends.cudnn.deterministic = True
 
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.2, last_epoch=-1)     # 设置学习率下降策略
