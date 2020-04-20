@@ -56,7 +56,7 @@ class RawDataIterator:
         assert mask_miss.dtype == np.float32, mask_miss.dtype
         assert mask_all.dtype == np.float32, mask_all.dtype
 
-        # we need layered mask_miss on next stage  不进行通道的复制，利用pytorch中的broadcast，节省内存
+        # we need layered `mask_miss` on next stage  NOTE: 不进行通道的复制，利用pytorch中的broadcast，节省内存
 
         # create heatmaps without mask
         labels = self.heatmapper.create_heatmaps(meta['joints'].astype(np.float32), mask_all)
@@ -116,11 +116,11 @@ class RawDataIterator:
         meta = json.loads(entry[()])  # `entry.value() == entry[()]` in the new version of hdf5
         debug = json.loads(entry.attrs['meta'])
         meta = config.convert(meta, self.global_config)  # > `COCOSourceConfig`: 改变keypoint数据定义，以满足CMU工作中的要求
-        img = images[meta['image']][()]  # > (W, H, C)
+        img = images[meta['image']][()]  # > (H, W, C)
         mask_miss = None
-        img_w, img_h, img_c = img.shape
-        # if we use imencode in `coco_mask_hdf5.py`, WARN: not used anymore.
-        if len(img.shape) == 2 and img_h == 1:
+        img_h, img_w, img_c = img.shape
+        # if we use imencode in `coco_mask_hdf5.py`, WARN: not used `imencode()` eanymore.
+        if len(img.shape) == 2 and img_w == 1:
             img = cv2.imdecode(img, flags=-1)
 
         # if no mask is available, see the image storage operation in coco_mask_hdf5.py, concat image and mask together
@@ -136,10 +136,10 @@ class RawDataIterator:
                 # if len(mask_miss.shape) == 2 and mask_miss.shape[1] == 1:
                 #     mask_miss = cv2.imdecode(mask_miss, flags=-1)
 
-                mask_miss, mask_all = mask_concat[:, :, 0], mask_concat[:, :, 1]
+                mask_miss, mask_all = mask_concat[:, :, 0], mask_concat[:, :, 1]  # > (H, W), (H, W)
         if mask_miss is None:  # 对于没有mask的image，为了后面计算的形式上能够统一，制造一个全是255的mask，这是为了兼容MPII数据集
-            mask_miss = np.full((img.shape[0], img.shape[1]), fill_value=255, dtype=np.uint8)  # mask area are 0
-            mask_all = np.full((img.shape[0], img.shape[1]), fill_value=0, dtype=np.uint8)  # mask area are 1
+            mask_miss = np.full((img_h, img_w), fill_value=255, dtype=np.uint8)  # mask area are 0
+            mask_all = np.full((img_h, img_w), fill_value=0, dtype=np.uint8)  # mask area are 1
 
         return img, mask_miss, mask_all, meta, debug
 

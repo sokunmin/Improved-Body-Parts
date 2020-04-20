@@ -16,14 +16,14 @@ class AugmentSelection:
 
     @staticmethod  # staticmethod支持类对象或者实例对方法的调用
     def random(transform_params):
-        flip = random.uniform(0., 1.) < transform_params.flip_prob  # > 0.5
-        tint = random.uniform(0., 1.) < transform_params.tint_prob  # > 0.2
-        degree = random.uniform(-1., 1.) * transform_params.max_rotate_degree  # > 40
+        flip = random.uniform(0., 1.) < transform_params.flip_prob  # > `flip_prob`: 0.5
+        tint = random.uniform(0., 1.) < transform_params.tint_prob  # > `tint_prob`: 0.2
+        degree = random.uniform(-1., 1.) * transform_params.max_rotate_degree  # > `max_rotate_degree`: 40
         # `scale_prob`: 0.8, `scale_max`: 1.3, `scale_min`: 0.7 -> random scale [0.7, 1.3]
         scale = (transform_params.scale_max - transform_params.scale_min) * random.uniform(0., 1.) + \
                  transform_params.scale_min if random.uniform(0., 1.) < transform_params.scale_prob else 1.
 
-        x_offset = int(random.uniform(-1., 1.) * transform_params.center_perterb_max)  # > 50
+        x_offset = int(random.uniform(-1., 1.) * transform_params.center_perterb_max)  # > `center_perterb_max`: 50
         y_offset = int(random.uniform(-1., 1.) * transform_params.center_perterb_max)
 
         return AugmentSelection(flip, tint, degree, (x_offset, y_offset), scale)
@@ -39,15 +39,15 @@ class AugmentSelection:
 
         return AugmentSelection(flip, tint, degree, (x_offset, y_offset), scale)
 
-    def affine(self, center, scale_self, config):
+    def affine(self, center, scale_self, config):  # `scale_self=scale_provided`: bbox / img_size
         # the main idea: we will do all image transformations with one affine matrix.
         # this saves lot of cpu and make code significantly shorter
         # same affine matrix could be used to transform joint coordinates afterwards
-        scale_self *= (config.height / (config.height - 1))
+        scale_self *= (config.height / (config.height - 1))  # > `height`: 512, TOCHECK: -1 in divider?
 
         A = cos(self.degree / 180. * pi)
         B = sin(self.degree / 180. * pi)
-
+        # > `target_dist`: 0.6, `scale`: [0.7, 1.3)
         scale_size = config.transform_params.target_dist / scale_self * self.scale
         # target_dist是调整人占整个图像的比例吗？
         # It used in picture augmentation during training. Rough meaning is "height of main person on image should
@@ -55,11 +55,11 @@ class AugmentSelection:
         # https://github.com/anatolix/keras_Realtime_Multi-Person_Pose_Estimation/blob/master/py_rmpe_server/py_rmpe_transformer.py
         # This mean we will scale picture so height of person always will be 0.6 of picture.
         # After it we apply random scaling (self.scale) from 0.6 to 1.1
-        (width, height) = center
+        (width, height) = center  # > person center
         center_x = width
         center_y = height
-
-        # 为了处理方便，将图像变换到以原点为中心
+        # > SEE: https://upload.wikimedia.org/wikipedia/commons/2/2c/2D_affine_transformation_matrix.svg
+        # 为了处理方便，将图像变换到以原点为中心 = translate to (-center_x, -center_y)
         center2zero = np.array([[1., 0., -center_x],
                                 [0., 1., -center_y],
                                 [0., 0., 1.]])
@@ -76,14 +76,14 @@ class AugmentSelection:
                          [0., 1., 0.],
                          [0., 0., 1.]])
 
-        # 最后再从原点中心变换到指定图像大小尺寸的中心上去并且进行随机平移
+        # > TOCHECK: 最后再从原点中心变换到指定图像大小尺寸的中心上去并且进行随机平移, `crop`: (x_offset, y_offset)
         center2center = np.array([[1., 0., config.width / 2 - 0.5 + self.crop[0]],
                                   [0., 1., config.height / 2 - 0.5 + self.crop[1]],
                                   [0., 0., 1.]])
 
         # order of combination is reversed
-        # 这取决于坐标是行向量还是列向量，对应变换矩阵是左乘还是右乘，此处坐标用的是列向量形式
-        combined = center2center.dot(flip).dot(scale).dot(rotate).dot(center2zero)
+        # > TOCHECK: 这取决于坐标是行向量还是列向量，对应变换矩阵是左乘还是右乘，此处坐标用的是列向量形式
+        combined = center2center.dot(flip).dot(scale).dot(rotate).dot(center2zero)  # > matrix: (3,3)
 
         return combined[0:2], scale_size
 
@@ -122,63 +122,63 @@ class Transformer:
         assert meta['scale_provided'][0] != 0, "************ scale_proviede is zero, dividing zero! ***********"
         # > `objpos`: person center(x,y), `scale_provided`: bbox / img_size
         M, scale_size = aug.affine(meta['objpos'][0], meta['scale_provided'][0], self.config)
-        # 根据排名第一的main person进行图像缩放
+        # 根据排名第一的`main person`进行图像缩放
         # need to understand this,
-        # scale_provided[0] is height of main person divided by 512, calculated in generate_hdf5.py
+        # `scale_provided[0]` is height of main person divided by 512, calculated in generate_hdf5.py
         # print(img.shape)
 
         # 变换之后还会缩放到config.height大小, (self.config.height, self.config.width)　指定的是返回图像的尺寸
-        img = cv2.warpAffine(img, M, (self.config.height, self.config.width),
+        img = cv2.warpAffine(img, M, (self.config.height, self.config.width),  # > img_size -> input_size
                              flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(124, 127, 127))
         # for debug, see the transformed data
         # plt.imshow(img[:,:,[2,1,0]])  # opencv imread ---> BGR order
         # plt.show()
 
-        # mask也要做一致的变换  FIXME: resize插值算法改成三次立方
+        # mask也要做一致的变换  TOCHECK: resize插值算法改成三次立方 (INTER_CUBIC)
         mask_miss = cv2.warpAffine(mask_miss, M, (self.config.height, self.config.width),
                                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=255)  # cv2.INTER_CUBIC适合放大
-
+        # > mask_shape = input_size // stride
         mask_miss = cv2.resize(mask_miss, self.config.mask_shape,     # mask shape　是统一的 46*46
                                interpolation=cv2.INTER_AREA)
 
         mask_all = cv2.warpAffine(mask_all, M, (self.config.height, self.config.width),
                                   flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        #
+        # > mask_shape = input_size // stride
         mask_all = cv2.resize(mask_all, self.config.mask_shape,    # mask shape　是统一的 46*46
                               interpolation=cv2.INTER_AREA)
 
-        # # debug usage: show the image and corresponding mask area
-        # # mask areas are in dark when display
+        # NOTE: debug usage: show the image and corresponding mask area
+        # NOTE: mask areas are in dark when display
         # plt.imshow(img[:, :, [2, 1, 0]])
-        # plt.imshow(np.repeat(mask_image_size[:, :, np.newaxis], 3, axis=2), alpha=0.5)  # mask_all
+        # plt.imshow(np.repeat(mask_all[:, :, np.newaxis], 3, axis=2), alpha=0.5)  # mask_all
         # plt.show()
 
         # warp key points
         # Issue: joint could be cropped by augmentation, in this case we should mark it as invisible.
         # update: may be we don't need it actually, original code removed part sliced more than half totally,
         # may be we should keep it
-        original_points = meta['joints'].copy()
+        original_points = meta['joints'].copy()  # > (#obj, 18, 3)
         original_points[:, :, 2] = 1  # we reuse 3rd column in completely different way here, it is hack
         # -----------------------------------------------------------------------------　#
         # 需要添加超过边界时此时设为2吗？ 上面的update已经回答了这个问题，在heatmaper.py生成时使用了slice
         # -----------------------------------------------------------------------------　#
 
-        # we use 0 - hidden, 1 visible, 2 absent - it is not coco values they processed by generate_hdf5
-        converted_points = np.matmul(M, original_points.transpose([0, 2, 1])).transpose([0, 2, 1])  # 关键点的坐标变换
+        # we use `0: hidden`, `1: visible`, `2: absent` - it is not coco values they processed by `generate_hdf5`
+        converted_points = np.matmul(M, original_points.transpose([0, 2, 1])).transpose([0, 2, 1])  # 关键点的坐标变换: (#obj, 18, (x,y))
         # 从矩阵相乘的方式来看，坐标表示用的是列向量，所以是左乘变换矩阵
         meta['joints'][:, :, 0:2] = converted_points
 
         # we just made image flip, i.e. right leg just became left leg, and vice versa
         if aug.flip:
-            tmpLeft = meta['joints'][:, self.config.leftParts, :]  # 通过中间的缓存变量进行交换
-            tmpRight = meta['joints'][:, self.config.rightParts, :]
-            meta['joints'][:, self.config.leftParts, :] = tmpRight
-            meta['joints'][:, self.config.rightParts, :] = tmpLeft
+            tmp_left = meta['joints'][:, self.config.leftParts, :]  # 通过中间的缓存变量进行交换
+            tmp_right = meta['joints'][:, self.config.rightParts, :]
+            meta['joints'][:, self.config.leftParts, :] = tmp_right
+            meta['joints'][:, self.config.rightParts, :] = tmp_left
         # print('*********************', img.shape, meta['joints'].shape)
         # meta['joints'].shape = (num_of_person, 18, 3)，其中18是18个关键点，3代表（x,y,v)
 
         # normalize image to 0~1 here to save gpu/cpu time
-        # mask - 除以255之后，被mask地方是0.0,没有mask地方是1.0
+        # TOCHECK: mask - 除以255之后，被mask地方是0.0,没有mask地方是1.0
         # return transformed data as flot32 format
         return img.astype(np.float32)/255., mask_miss.astype(np.float32)/255., mask_all.astype(np.float32)/255., meta
 

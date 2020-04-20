@@ -23,10 +23,10 @@ class Heatmapper:
         self.config = config
         self.sigma = config.transform_params.sigma  # > σ_k: 9
         self.paf_sigma = config.transform_params.paf_sigma  # > σ_p: 7
-        self.double_sigma2 = 2 * self.sigma * self.sigma  # > 2*σ^2 = 162
+        self.double_sigma2 = 2 * self.sigma * self.sigma  # > 2*σ^2 = 162  # TOCHECK: why?
         # set responses lower than gaussian_thre to 0
         self.keypoint_gaussian_thre = config.transform_params.keypoint_gaussian_thre  # > 0.015
-        self.limb_gaussian_thre = config.transform_params.limb_gaussian_thre
+        self.limb_gaussian_thre = config.transform_params.limb_gaussian_thre   # > 0.015
         self.gaussian_size = ceil((sqrt(-self.double_sigma2 * log(self.keypoint_gaussian_thre))) / config.stride) * 2  # TOCHECK: 14
         self.offset_size = self.gaussian_size // 2 + 1  # + 1  # offset vector range TOCHECK: 8
         self.thre = config.transform_params.paf_thre  # > 4
@@ -57,10 +57,10 @@ class Heatmapper:
         :return: Masked groundtruth heatmaps!
         """
         # print(joints.shape)  # 例如(3, 18, 3)，把每个main person作为图片的中心，但是依然可能会包括其他不同的人在这个裁剪后的图像中
-        heatmaps = np.zeros(self.config.parts_shape, dtype=np.float32)  # config.parts_shape: 46, 46, 57
-        # 此处的heat map一共有57个channel，包含了heat map以及paf以及背景channel。
-        # 并且对heat map初始化为0很重要，因为这样使得没有标注的区域是没有值的！
-        self.put_joints(heatmaps, joints)
+        heatmaps = np.zeros(self.config.parts_shape, dtype=np.float32)  # `config.parts_shape`: (128, 128, #layer=50)
+        # 此处的heatmap一共有57个channel，包含了heatmap以及paf以及背景channel。
+        # TOCHECK: 并且对heatmap初始化为0很重要，因为这样使得没有标注的区域是没有值的！
+        self.put_joints(heatmaps, joints)  # > `heatmaps`: (128, 128, 50), `joints`: (#obj, 18, 3)
         # sl = slice(self.config.heat_start, self.config.heat_start + self.config.heat_layers)
         # python切片函数　class slice(start, stop[, step])
         # Generate foreground of keypoint heat map 删除了一些代码，原始请参考之前对body part项目
@@ -68,7 +68,7 @@ class Heatmapper:
 
         # # 某个位置的背景heatmap值定义为这个坐标位置处　最大的某个类型节点高斯响应的补 1. - np.amax(heatmaps[:, :, sl], axis=2)
         # 如果加入的是前景而不是背景，则响应是　np.amax(heatmaps[:, :, sl], axis=2)
-
+        # > `heatmaps`: (128, 128, 50), `joints`: (#obj, 18, 3)
         self.put_limbs(heatmaps, joints)
 
         # add foreground (mask_all) channel, i.e., the person segmentation mask
@@ -80,7 +80,7 @@ class Heatmapper:
         sl = slice(self.config.heat_start, self.config.heat_start + self.config.heat_layers)  # consider all real joints
         heatmaps[:, :, self.config.bkg_start + 1] = np.amax(heatmaps[:, :, sl], axis=2)  # 1 -  #原来是取反的
 
-        # 重要！不要忘了将生成的groundtruth heatmap乘以mask，以此掩盖掉没有标注的crowd以及只有很少keypoint的人
+        # NOTE:不要忘了将生成的groundtruth heatmap乘以mask，以此掩盖掉没有标注的crowd以及只有很少keypoint的人
         # 并且，背景的mask_all没有乘以mask_miss，训练时只是对没有关键点标注的heatmap区域mask掉不做监督，而不需要对输入图片mask!
         # heatmaps *= mask_miss[:, :, np.newaxis]  # fixme: 放在loss计算中，对mask_all不需要乘mask_miss，不缺标注
 
@@ -97,18 +97,18 @@ class Heatmapper:
         heatmaps = np.clip(heatmaps, 0., 1.)  # 防止数据异常
         return heatmaps.transpose((2, 0, 1))  # pytorch need N*C*H*W format
 
-    def put_gaussian_maps(self, heatmaps, layer, joints):
-        # update: 只计算一定区域内而不是全图像的值来加速GT的生成，参考associate embedding
-        #  change the gaussian map to laplace map to get a shapper peak of keypoint ?? the result is not good
-        # actually exp(a+b) = exp(a)*exp(b), lets use it calculating 2d exponent, it could just be calculated by
-
-        for i in range(joints.shape[0]):  # 外层循环是对每一个joint都在对应类型channel的feature map上产生一个高斯分布
+    def put_gaussian_maps(self, heatmaps, joint_id, joints):
+        # update: 只计算一定区域内而不是全图像的值来加速GT的生成，参考`Associate Embedding`
+        #  TOCHECK: change `gaussian map` to `laplace map` to get a shapper peak of keypoint ?? the result is not good
+        #   actually `exp(a+b) = exp(a) * exp(b)`, lets use it calculating 2d exponent, it could just be calculated by
+        # > `joints`: (#visible_kp, (x,y))
+        for i in range(joints.shape[0]):  # > #visible <- 外层循环是对每一个joint都在对应类型channel的feature map上产生一个高斯分布
 
             # --------------------------------------------------------------------------------------------------#
-            # 这里是个技巧，grid_x其实取值范围是0~368，起点是3.5，终点值是363.5，间隔为8，这样就是在原始368个位置上计算高斯值，
+            # 这里是个技巧，`grid_x`其实取值范围是`0~368`，起点是`3.5`，终点值是`363.5`，间隔为`8`，这样就是在原始`368`个位置上计算高斯值，
             # 采样了46个点，从而最大程度保留了原始分辨率尺寸上的响应值，避免量化误差！而不是生成原始分辨率大小的ground truth然后缩小8倍　　
-
-            # 如果使用高斯分布，限制guassin response生成的区域，以此加快运算
+            # > `stride`: 4, `gaussian_size`: 14
+            # 如果使用高斯分布，gaussian response生成的区域，以此加快运算
             x_min = int(round(joints[i, 0] / self.config.stride) - self.gaussian_size // 2)
             x_max = int(round(joints[i, 0] / self.config.stride) + self.gaussian_size // 2 + 1)
             y_min = int(round(joints[i, 1] / self.config.stride) - self.gaussian_size // 2)
@@ -130,26 +130,26 @@ class Heatmapper:
             # slice can also crop the extended index of a numpy array and return empty array []
             slice_x = slice(x_min, x_max)
             slice_y = slice(y_min, y_max)
-
+            # > TOCHECK: `grid_x/grid_y`: (128,), `joints`: (#visible, (x,y)), `double_sigma2`: 162
             exp_x = np.exp(-(self.grid_x[slice_x].astype(np.float32) - joints[i, 0]) ** 2 /
-                           np.array([self.double_sigma2]).astype(np.float32))
+                           np.array([self.double_sigma2]).astype(np.float32))  # > #pixel of disk
             exp_y = np.exp(-(self.grid_y[slice_y].astype(np.float32) - joints[i, 1]) ** 2 /
-                           np.array([self.double_sigma2]).astype(np.float32))
-
-            exp = np.outer(exp_y, exp_x)  # np.outer的计算，两个长度为M,N的向量的外积结果是M*N的矩阵
+                           np.array([self.double_sigma2]).astype(np.float32))  # > #pixel of disk
+            # > TOCHECK:
+            exp = np.outer(exp_y, exp_x)  # > (#pixel, #pixel): np.outer的计算，两个长度为M,N的向量的外积结果是M*N的矩阵
             # --------------------------------------------------------------------------------------------------#
 
             # # heatmap　如果使用拉普拉斯分布：dis = exp-(math.sqrt((xx - x) * (xx - x) + (yy - y) * (yy - y)) / 2.0 / sigma)
             # dist = np.sqrt((self.X - joints[i, 0])**2 + (self.Y - joints[i, 1])**2) / 2.0 / self.sigma
             # np.where(dist > 4.6052, 1e8, dist) # 距离中心太远的不赋值
             # exp = np.exp(-dist)
-
             # note this is correct way of combination - min(sum(...),1.0) as was in C++ code is incorrect
             # https://github.com/ZheC/Realtime_Multi-Person_Pose_Estimation/issues/118
-            heatmaps[slice_y, slice_x, self.config.heat_start + layer] = \
-                np.maximum(heatmaps[slice_y, slice_x, self.config.heat_start + layer], exp)
-            # 这一句代码是解决如何处理一个位置可能有不同人的关节点的高斯响应图的生成“覆盖”的问题，不取这两个点的高斯分布的平均，而是取最大值
-            # Notice!
+            # > TOCHECK: `heatmaps`: (128, 128, 50), `heat_start`: 30
+            heatmaps[slice_y, slice_x, self.config.heat_start + joint_id] = \
+                np.maximum(heatmaps[slice_y, slice_x, self.config.heat_start + joint_id], exp)  # > (#pixel, #pixel)
+            # TOCHECK: 这一句代码是解决如何处理一个位置可能有不同人的关节点的高斯响应图的生成“覆盖”的问题，不取这两个点的高斯分布的平均，而是取最大值
+            # NOTE:
             # ------------------------------------------------------------------------------------------------ #
             # 每一条曲线的峰值都表示这个位置存在关键点的可能性最高，如论文公式(7)图所示，可能有两个关键点距离比较近，这两条高斯曲线
             # 如果取平均值的话，很明显就从两个峰值变成一个峰值了，那最后预测出的结果可能就只有一个关键点了。所以这里取的是最大值。
@@ -157,29 +157,29 @@ class Heatmapper:
 
     def put_joints(self, heatmaps, joints):
 
-        for i in range(self.config.num_parts):  # len(config.num_parts) = 18, 不包括背景keypoint
-            visible = joints[:, i, 2] < 2  # only annotated (visible) keypoints are considered !
+        for i in range(self.config.num_parts):  # > #parts=18, 不包括背景keypoint
+            visible = joints[:, i, 2] < 2  # > (#obj,): only annotated (visible) keypoints are considered !
             self.put_gaussian_maps(heatmaps, i, joints[visible, i, 0:2])  # 逐个channel地进行ground truth的生成
 
     def put_limb_gaussian_maps(self, heatmaps, layer, joint_from, joint_to):
         """
         生成一个channel上的PAF groundtruth
         """
-
-        count = np.zeros(heatmaps.shape[:-1], dtype=np.float32)  # count用来记录某一个位置点上有多少非零的paf，以便后面做平均
-        for i in range(joint_from.shape[0]):
+        # > `heatmaps`: (128, 128, 50)
+        count = np.zeros(heatmaps.shape[:-1], dtype=np.float32)  # > (128, 128): count用来记录某一个位置点上有多少非零的paf，以便后面做平均
+        for i in range(joint_from.shape[0]):  # > (#from, 2) among people
             (x1, y1) = joint_from[i]
             (x2, y2) = joint_to[i]
-
+            # TOCHECK: norm?
             dx = x2 - x1
             dy = y2 - y1
             dnorm = dx * dx + dy * dy
 
-            if dnorm == 0:  # we get nan here sometimes, it's kills NN
+            if dnorm == 0:
                 # we get nan here sometimes, it's kills NN
                 # handle it better. probably we should add zero paf, centered paf,
                 # or skip this completely. add a special paf?
-                # 我认为可以不用去处理，在后处理时，把没有形成limb的点分配给距离最近的那个人即可
+                # TOCHECK: 我认为可以不用去处理，在后处理时，把没有形成limb的点分配给距离最近的那个人即可
                 print("Parts are too close to each other. Length is zero. Skipping")
                 continue
 
@@ -190,8 +190,8 @@ class Heatmapper:
 
             min_sx, max_sx = (x1, x2) if x1 < x2 else (x2, x1)
             min_sy, max_sy = (y1, y2) if y1 < y2 else (y2, y1)
-
             # include the two end-points of the limbs
+            # > `thre`: 4, `stride`: 4
             min_sx = int(round((min_sx - self.thre) / self.config.stride))
             min_sy = int(round((min_sy - self.thre) / self.config.stride))
             max_sx = int(round((max_sx + self.thre) / self.config.stride))
@@ -231,14 +231,14 @@ class Heatmapper:
         """
          # 循环调用逐个channel生成ground truth的函数，最外层循环是对应某个limb的某一个channel
         """
-        for (i, (fr, to)) in enumerate(self.config.limbs_conn):
+        for (i, (fr, to)) in enumerate(self.config.limbs_conn):  # > #connect: 30
             visible_from = joints[:, fr, 2] < 2  # 判断该点是否被标注了
             visible_to = joints[:, to, 2] < 2
             visible = visible_from & visible_to  # &: 按位取and, 只有两个节点都标注了才能生成paf, v=0,1时表示该点被标注了
             # In this project:  0 - marked but invisible, 1 - marked and visible, which is different from coco　dataset
-
-            layer = self.config.paf_start + i
-            self.put_limb_gaussian_maps(heatmaps, layer, joints[visible, fr, 0:2], joints[visible, to, 0:2])
+            # > `paf_start`: 0, `heatmaps`: (128, 128, 50), `joints`: (#obj, 18, 3)
+            part_id = self.config.paf_start + i
+            self.put_limb_gaussian_maps(heatmaps, part_id, joints[visible, fr, 0:2], joints[visible, to, 0:2])
 
     def put_offset_vector_maps(self, offset_vectors, mask_offset, layer, joints):
         """
