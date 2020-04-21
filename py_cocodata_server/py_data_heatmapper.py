@@ -25,10 +25,10 @@ class Heatmapper:
         self.config = config
         self.sigma = config.transform_params.sigma  # > σ_k: 9
         self.paf_sigma = config.transform_params.paf_sigma  # > σ_p: 7
-        self.double_sigma2 = 2 * self.sigma * self.sigma  # > 2*σ^2 = 162  # TOCHECK: why?
         # set responses lower than gaussian_thre to 0
         self.keypoint_gaussian_thre = config.transform_params.keypoint_gaussian_thre  # > 0.015
         self.limb_gaussian_thre = config.transform_params.limb_gaussian_thre   # > 0.015
+        self.double_sigma2 = 2 * self.sigma * self.sigma  # > 2*σ^2 = 162  # TOCHECK: why?
         self.gaussian_size = ceil((sqrt(-self.double_sigma2 * log(self.keypoint_gaussian_thre))) / config.stride) * 2  # TOCHECK: 14
         self.offset_size = self.gaussian_size // 2 + 1  # + 1  # offset vector range TOCHECK: 8
         self.thre = config.transform_params.paf_thre  # > 4

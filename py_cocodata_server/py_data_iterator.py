@@ -56,8 +56,9 @@ class RawDataIterator:
         # 因为在transformer.py中对mask做了立方插值的resize, 且　/225., 所以类型变成了float
         assert mask_miss.dtype == np.float32, mask_miss.dtype
         assert mask_all.dtype == np.float32, mask_all.dtype
-
         # we need layered `mask_miss` on next stage  NOTE: 不进行通道的复制，利用pytorch中的broadcast，节省内存
+        # https: // ithelp.ithome.com.tw / articles / 10196167
+        # https://stackoverflow.com/questions/47078415/is-it-possible-to-copy-numpy-variable-values-to-clipboard-in-pycharm
         # DEBUG: np.savez("heatmap_test.npz", img=image, joints=meta['joints'].astype(np.float32), mask_all=mask_all, mask_miss=mask_miss)
         # create heatmaps without mask
         labels = self.heatmapper.create_heatmaps(meta['joints'].astype(np.float32), mask_all)
