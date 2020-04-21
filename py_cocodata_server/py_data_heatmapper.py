@@ -3,6 +3,8 @@
 import numpy as np
 from math import sqrt, isnan, log, ceil
 import cv2
+import matplotlib.pyplot as plt
+from config.config import TrainingOpt, GetConfig
 
 
 class Heatmapper:
@@ -342,11 +344,26 @@ def distances(X, Y, sigma, x1, y1, x2, y2, thresh=0.01, return_dist=False):  # T
 
 
 def test():
-    hm = Heatmapper()
-    d = distances(hm.X, hm.Y, 100, 100, 50, 150)
-    print(d < 8.)
+    opt = TrainingOpt()
+    config = GetConfig(opt.config_name)
+    hm = Heatmapper(config)
+    heatmap_test = np.load("heatmap_test.npz")
+    img = heatmap_test['img']
+    joints = heatmap_test['joints']
+    mask_all = heatmap_test['mask_all']
+    mask_miss = heatmap_test['mask_miss']
+    plt.imshow(img[:, :, [2, 0, 1]])
+    plt.show()
+    plt.imshow(mask_all)
+    plt.show()
+    plt.imshow(mask_miss)
+    plt.show()
+    labels = hm.create_heatmaps(joints, mask_all)
+    print()
+    # d = distances(hm.X, hm.Y, 100, 100, 50, 150)
+    # print(d < 8.)
 
 
 if __name__ == "__main__":
-    np.set_printoptions(precision=1, linewidth=1000, suppress=True, threshold=100000)
+    # np.set_printoptions(precision=1, linewidth=1000, suppress=True, threshold=100000)
     test()

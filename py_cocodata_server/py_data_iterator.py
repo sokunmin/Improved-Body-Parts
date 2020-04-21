@@ -9,7 +9,7 @@ from py_cocodata_server.py_data_transformer import Transformer, AugmentSelection
 from py_cocodata_server.py_data_heatmapper import Heatmapper
 from time import time
 import matplotlib.pyplot as plt
-
+import pandas as pd
 
 class RawDataIterator:
     """ The real DataIterator which generates the training materials"""
@@ -31,6 +31,7 @@ class RawDataIterator:
         # datum[0]: <HDF5 group "dataset">, is the annotation file used in our project
         with h5py.File(self.h5file_path, 'r') as file:
             self.keys = list(file['dataset'].keys())
+
     # > `MyData.__getitem__() -> gen()`
     def gen(self, index):
         # 这个gen()函数是真正生成训练所需的ground truth数据，并且在ds_generators.py中被调用，
@@ -57,7 +58,7 @@ class RawDataIterator:
         assert mask_all.dtype == np.float32, mask_all.dtype
 
         # we need layered `mask_miss` on next stage  NOTE: 不进行通道的复制，利用pytorch中的broadcast，节省内存
-
+        # DEBUG: np.savez("heatmap_test.npz", img=image, joints=meta['joints'].astype(np.float32), mask_all=mask_all, mask_miss=mask_miss)
         # create heatmaps without mask
         labels = self.heatmapper.create_heatmaps(meta['joints'].astype(np.float32), mask_all)
 

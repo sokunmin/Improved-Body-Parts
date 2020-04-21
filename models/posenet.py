@@ -71,11 +71,9 @@ class PoseNet(nn.Module):
 
         # TODO: change the merge layers, Merge(inp_dim + j * increase, inp_dim + j * increase)
         self.merge_feats = nn.ModuleList(
-            [nn.ModuleList([Merge(inp_dim, inp_dim + j * increase, bn=bn)
-                            for j in range(5)]) for i in range(nstack - 1)])
+            [nn.ModuleList([Merge(inp_dim, inp_dim + j * increase, bn=bn) for j in range(5)]) for i in range(nstack - 1)])
         self.merge_preds = nn.ModuleList(
-            [nn.ModuleList([Merge(oup_dim, inp_dim + j * increase, bn=bn)
-                            for j in range(5)]) for i in range(nstack - 1)])
+            [nn.ModuleList([Merge(oup_dim, inp_dim + j * increase, bn=bn) for j in range(5)]) for i in range(nstack - 1)])
         self.nstack = nstack
         if init_weights:
             self._initialize_weights()
@@ -103,16 +101,13 @@ class PoseNet(nn.Module):
             for j in range(5):  # handle 5 scales of heatmaps
                 preds_instack.append(self.outs[i][j](features_instack[j]))
                 if i != self.nstack - 1:
+                    cache = self.merge_preds[i][j](preds_instack[j]) + self.merge_feats[i][j](features_instack[j])
                     if j == 0:
-                        x = x + self.merge_preds[i][j](preds_instack[j]) + \
-                                self.merge_feats[i][j](features_instack[j])  # input tensor for next stack
-                        features_cache[j] = self.merge_preds[i][j](preds_instack[j]) + \
-                                            self.merge_feats[i][j](features_instack[j])
-
+                        x = x + cache
+                        features_cache[j] = cache
                     else:
                         # reset the res caches
-                        features_cache[j] = self.merge_preds[i][j](preds_instack[j]) + \
-                                            self.merge_feats[i][j](features_instack[j])
+                        features_cache[j] = cache
             pred.append(preds_instack)
         # returned list shape: [nstack * [batch*128*128, batch*64*64, batch*32*32, batch*16*16, batch*8*8]]z
         return pred

@@ -63,7 +63,8 @@ class PoseNet(nn.Module):
         # predict 5 different scales of heatmpas per stack, keep in mind to pack the list using ModuleList.
         # Notice: nn.ModuleList can only identify Module subclass! Thus, we must pack the inner layers in ModuleList.
         self.outs = nn.ModuleList(
-            [nn.ModuleList([Conv(inp_dim + j * increase, oup_dim, 1, relu=False, bn=False) for j in range(5)]) for i in
+            [nn.ModuleList([Conv(inp_dim + j * increase, oup_dim, 1, relu=False, bn=False)
+                            for j in range(5)]) for i in
              range(nstack)])
         self.channel_attention = nn.ModuleList(
             [nn.ModuleList([SELayer(inp_dim + j * increase) for j in range(5)]) for i in
@@ -105,8 +106,8 @@ class PoseNet(nn.Module):
                 preds_instack.append(self.outs[i][j](features_instack[j]))
                 if i != self.nstack - 1:
                     if j == 0:
-                        x = x + self.merge_preds[i][j](preds_instack[j]) + self.merge_features[i][j](
-                            features_instack[j])  # input tensor for next stack
+                        x = x + self.merge_preds[i][j](preds_instack[j]) + \
+                                self.merge_features[i][j](features_instack[j])  # input tensor for next stack
                         features_cache[j] = self.merge_preds[i][j](preds_instack[j]) + self.merge_features[i][j](
                             features_instack[j])
 

@@ -162,7 +162,6 @@ class Backbone(nn.Module):
     """
     def __init__(self, nFeat=256, inplanes=3, resBlock=Residual, dilatedBlock=DilatedConv):
         super(Backbone, self).__init__()
-        self.nFeat = nFeat  # > 256
         self.resBlock = resBlock
         self.inplanes = inplanes  # > 3
         self.conv1 = nn.Conv2d(self.inplanes, 64, kernel_size=7, stride=2, padding=3, bias=False)
