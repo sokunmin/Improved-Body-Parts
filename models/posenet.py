@@ -75,7 +75,7 @@ class PoseNet(nn.Module):
             if t < num_stages - 1:
                 self.merge_features.append(nn.ModuleList([Merge(inp_dim, inp_dim + j * increase, bn=bn) for j in range(5)]))
                 self.merge_preds.append(nn.ModuleList([Merge(oup_dim, inp_dim + j * increase, bn=bn) for j in range(5)]))
-        self.nstack = num_stages
+        self.num_stages = num_stages
         self.num_scales = 5
         if init_weights:
             self._initialize_weights()
@@ -87,25 +87,25 @@ class PoseNet(nn.Module):
         pred = []
         feat_caches = [[]] * self.num_scales
         # loop over stack
-        for t in range(self.nstack):  # > 4
+        for t, hg, se_block, out_blocks in \
+                zip(range(self.num_stages), self.hourglass, self.features, self.outs):  # > 4
             preds_instack = []
             # -> (0:256, 1:384, 2:512, 3:640, 4:786)
-            hg_feats = self.hourglass[t](x)  # -> 5 scales of feature maps
+            hg_feats = hg(x)  # -> 5 scales of feature maps
 
             if t == 0:  # cache for smaller feature maps produced by hourglass block
                 feat_caches = [torch.zeros_like(hg_feats[s]) for s in range(self.num_scales)]
+            else:
+                hg_feats = [hg_feats[s] + feat_caches[s] for s in range(self.num_scales)]
 
-            for s in range(5):  # handle 5 scales of heatmaps
-                # residual connection across stacks
-                #  python里面的+=, ，*=也是in-place operation,需要注意
-                hg_feats[s] = hg_feats[s] + feat_caches[s]
-
+            for s, head in zip(range(self.num_scales), out_blocks):  # handle 5 scales of heatmaps
                 # feature maps before heatmap regression
-                feats_instack = self.features[t](hg_feats)  # > 5 scales
+                feats_instack = se_block(hg_feats)  # > 5 scales
 
                 # > outs/bottlenecks: 1x1 conv layer * 5
-                preds_instack.append(self.outs[t][s](feats_instack[s]))
-                if t != self.nstack - 1:
+                preds_instack.append(head(feats_instack[s]))
+
+                if t != self.num_stages - 1:
                     cache = self.merge_preds[t][s](preds_instack[s]) + self.merge_features[t][s](feats_instack[s])
                     if s == 0:
                         x = x + cache
