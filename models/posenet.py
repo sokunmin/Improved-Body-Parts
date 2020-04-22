@@ -98,21 +98,18 @@ class PoseNet(nn.Module):
             else:
                 hg_feats = [hg_feats[s] + feat_caches[s] for s in range(self.num_scales)]
 
-            for s, head in zip(range(self.num_scales), out_blocks):  # handle 5 scales of heatmaps
-                # feature maps before heatmap regression
-                feats_instack = se_block(hg_feats)  # > 5 scales
+            feats_instack = se_block(hg_feats)  # > 5 scales
 
+            for s, head in zip(range(self.num_scales), out_blocks):  # handle 5 scales of heatmaps
                 # > outs/bottlenecks: 1x1 conv layer * 5
-                preds_instack.append(head(feats_instack[s]))
+                pred_out = head(feats_instack[s])
+                preds_instack.append(pred_out)
 
                 if t != self.num_stages - 1:
-                    cache = self.merge_preds[t][s](preds_instack[s]) + self.merge_features[t][s](feats_instack[s])
+                    cache = self.merge_preds[t][s](pred_out) + self.merge_features[t][s](feats_instack[s])
                     if s == 0:
                         x = x + cache
-                        feat_caches[s] = cache
-                    else:
-                        # reset the res caches
-                        feat_caches[s] = cache
+                    feat_caches[s] = cache
             pred.append(preds_instack)
         # returned list shape: [nstack * [batch*128*128, batch*64*64, batch*32*32, batch*16*16, batch*8*8]]z
         return pred
