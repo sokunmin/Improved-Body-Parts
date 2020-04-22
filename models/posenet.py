@@ -41,10 +41,10 @@ class Features(nn.Module):
 
 
 class PoseNet(nn.Module):
-    def __init__(self, nstack, inp_dim, oup_dim, bn=False, increase=128, init_weights=True, **kwargs):
+    def __init__(self, num_stages, inp_dim, oup_dim, bn=False, increase=128, init_weights=True, **kwargs):
         """
         Pack or initialize the trainable parameters of the network
-        :param nstack: number of stack
+        :param num_stages: number of stack
         :param inp_dim: input tensor channels fed into the hourglass block
         :param oup_dim: channels of regressed feature maps
         :param bn: use batch normalization
@@ -59,22 +59,24 @@ class PoseNet(nn.Module):
         # bn: True
         # increase: 128
         # init_weights: True
-        self.pre = Backbone(nFeat=inp_dim)  # > 256: It doesn't affect the results regardless of which self.pre is used
-        self.hourglass = nn.ModuleList([Hourglass(depth=4, nFeat=inp_dim, increase=increase, bn=bn) for _ in range(nstack)])
-        self.features = nn.ModuleList([Features(inp_dim=inp_dim, increase=increase, bn=bn) for _ in range(nstack)])
-        # predict 5 different scales of heatmpas per stack, keep in mind to pack the list using ModuleList.
-        # Notice: nn.ModuleList can only identify Module subclass! Thus, we must pack the inner layers in ModuleList.
-        # TODO: change the outs layers, Conv(inp_dim + j * increase, oup_dim, 1, relu=False, bn=False)
-        self.outs = nn.ModuleList(
-            [nn.ModuleList([Conv(inp_dim, oup_dim, 1, relu=False, bn=False)
-                            for j in range(5)]) for i in range(nstack)])
+        self.pre = Backbone()  # > 256: It doesn't affect the results regardless of which self.pre is used
+        self.hourglass = nn.ModuleList()
+        self.features = nn.ModuleList()
+        self.outs = nn.ModuleList()
+        self.merge_features = nn.ModuleList()
+        self.merge_preds = nn.ModuleList()
+        for t in range(num_stages):  # 4
+            self.hourglass.append(Hourglass(depth=4, nFeat=inp_dim, increase=increase, bn=bn))
+            self.features.append(Features(inp_dim=inp_dim, increase=increase, bn=bn))
+            # TODO: change the outs layers, Conv(inp_dim + j * increase, oup_dim, 1, relu=False, bn=False)
+            self.outs.append(nn.ModuleList([Conv(inp_dim, oup_dim, 1, relu=False, bn=False) for _ in range(5)]))
 
-        # TODO: change the merge layers, Merge(inp_dim + j * increase, inp_dim + j * increase)
-        self.merge_feats = nn.ModuleList(
-            [nn.ModuleList([Merge(inp_dim, inp_dim + j * increase, bn=bn) for j in range(5)]) for i in range(nstack - 1)])
-        self.merge_preds = nn.ModuleList(
-            [nn.ModuleList([Merge(oup_dim, inp_dim + j * increase, bn=bn) for j in range(5)]) for i in range(nstack - 1)])
-        self.nstack = nstack
+            # TODO: change the merge layers, Merge(inp_dim + j * increase, inp_dim + j * increase)
+            if t < num_stages - 1:
+                self.merge_features.append(nn.ModuleList([Merge(inp_dim, inp_dim + j * increase, bn=bn) for j in range(5)]))
+                self.merge_preds.append(nn.ModuleList([Merge(oup_dim, inp_dim + j * increase, bn=bn) for j in range(5)]))
+        self.nstack = num_stages
+        self.num_scales = 5
         if init_weights:
             self._initialize_weights()
 
@@ -83,31 +85,34 @@ class PoseNet(nn.Module):
         x = imgs.permute(0, 3, 1, 2)  # Permute the dimensions of images to (N, C, H, W)
         x = self.pre(x)
         pred = []
+        feat_caches = [[]] * self.num_scales
         # loop over stack
-        for i in range(self.nstack):  # > 4
+        for t in range(self.nstack):  # > 4
             preds_instack = []
             # -> (0:256, 1:384, 2:512, 3:640, 4:786)
-            hourglass_feature = self.hourglass[i](x)  # -> 5 scales of feature maps
+            hg_feats = self.hourglass[t](x)  # -> 5 scales of feature maps
 
-            if i == 0:  # cache for smaller feature maps produced by hourglass block
-                features_cache = [torch.zeros_like(hourglass_feature[scale_idx]) for scale_idx in range(5)]
+            if t == 0:  # cache for smaller feature maps produced by hourglass block
+                feat_caches = [torch.zeros_like(hg_feats[s]) for s in range(self.num_scales)]
 
-            else:  # residual connection across stacks
+            for s in range(5):  # handle 5 scales of heatmaps
+                # residual connection across stacks
                 #  python里面的+=, ，*=也是in-place operation,需要注意
-                hourglass_feature = [hourglass_feature[scale] + features_cache[scale] for scale in range(5)]
-            # feature maps before heatmap regression
-            features_instack = self.features[i](hourglass_feature)
+                hg_feats[s] = hg_feats[s] + feat_caches[s]
 
-            for j in range(5):  # handle 5 scales of heatmaps
-                preds_instack.append(self.outs[i][j](features_instack[j]))
-                if i != self.nstack - 1:
-                    cache = self.merge_preds[i][j](preds_instack[j]) + self.merge_feats[i][j](features_instack[j])
-                    if j == 0:
+                # feature maps before heatmap regression
+                feats_instack = self.features[t](hg_feats)  # > 5 scales
+
+                # > outs/bottlenecks: 1x1 conv layer * 5
+                preds_instack.append(self.outs[t][s](feats_instack[s]))
+                if t != self.nstack - 1:
+                    cache = self.merge_preds[t][s](preds_instack[s]) + self.merge_features[t][s](feats_instack[s])
+                    if s == 0:
                         x = x + cache
-                        features_cache[j] = cache
+                        feat_caches[s] = cache
                     else:
                         # reset the res caches
-                        features_cache[j] = cache
+                        feat_caches[s] = cache
             pred.append(preds_instack)
         # returned list shape: [nstack * [batch*128*128, batch*64*64, batch*32*32, batch*16*16, batch*8*8]]z
         return pred
@@ -141,7 +146,11 @@ class Network(torch.nn.Module):
     """
     def __init__(self, opt, config, bn=False, dist=False, swa=False):
         super(Network, self).__init__()
-        self.posenet = PoseNet(opt.nstack, opt.hourglass_inp_dim, config.num_layers, bn=bn, increase=opt.increase)
+        self.posenet = PoseNet(opt.nstack,
+                               opt.hourglass_inp_dim,
+                               config.num_layers,
+                               bn=bn,
+                               increase=opt.increase)
         # If we use train_parallel, we implement the parallel loss . And if we use train_distributed,
         # we should use single process loss because each process on these 4 GPUs  is independent
         self.criterion = MultiTaskLoss(opt, config) if dist else MultiTaskLossParallel(opt, config)

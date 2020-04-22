@@ -98,11 +98,13 @@ class Conv(nn.Module):
         if relu:
             self.relu = nn.LeakyReLU(negative_slope=0.01, inplace=True)  # 换成 Leak Relu减缓神经元死亡现象
         if bn:
-            self.conv = nn.Conv2d(inp_dim, out_dim, kernel_size, stride, padding=(kernel_size - 1) // 2, bias=False, dilation=1)
+            self.conv = nn.Conv2d(inp_dim, out_dim, kernel_size, stride,
+                                  padding=(kernel_size - 1) // 2, bias=False, dilation=1)
             # Different form TF, momentum default in Pytorch is 0.1, which means the decay rate of old running value
             self.bn = nn.BatchNorm2d(out_dim)
         else:
-            self.conv = nn.Conv2d(inp_dim, out_dim, kernel_size, stride, padding=(kernel_size - 1) // 2, bias=True, dilation=1)
+            self.conv = nn.Conv2d(inp_dim, out_dim, kernel_size, stride,
+                                  padding=(kernel_size - 1) // 2, bias=True, dilation=1)
 
     def forward(self, x):
         # examine the input channel equals the conve kernel channel
@@ -160,7 +162,7 @@ class Backbone(nn.Module):
     Pyramid Residual Modules (PRMs)
     Input Tensor: a batch of images with shape (N, C, H, W)
     """
-    def __init__(self, nFeat=256, inplanes=3, resBlock=Residual, dilatedBlock=DilatedConv):
+    def __init__(self, inplanes=3, resBlock=Residual, dilatedBlock=DilatedConv):
         super(Backbone, self).__init__()
         self.resBlock = resBlock
         self.inplanes = inplanes  # > 3
