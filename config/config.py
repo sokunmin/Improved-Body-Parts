@@ -15,8 +15,7 @@ class TrainingOpt:
     hourglass_inp_dim = 256
     increase = 128  # increased channels once down-sampling in the hourglass networks
     nstack_weight = [1, 1, 1, 1]  # weight the losses between different stacks, stack 1, stack 2, stack 3...
-    scale_weight = [0.1, 0.2, 0.4, 1.6,
-                    6.4]  # weight the losses between different scales, scale 128, scale 64, scale 32...
+    scale_weight = [0.1, 0.2, 0.4, 1.6, 6.4]  # weight the losses between different scales, scale 128, scale 64, scale 32...
     multi_task_weight = 0.1  # person mask loss vs keypoint loss
     keypoint_task_weight = 3  # keypoint heatmap loss vs body part heatmap loss
     # Download the pre-trained model snapshotted at epoch 52 first.

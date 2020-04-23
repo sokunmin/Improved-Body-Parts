@@ -14,6 +14,10 @@ A bottom-up approach for the problem of multi-person pose estimation.
 
 ![network](visulizatoin/2987.Figure3.png)
 
+![network](visulizatoin/network_details.png)
+
+![skeleton](visulizatoin/skeleton.png)
+
 ### Contents
 
 1. Training  
