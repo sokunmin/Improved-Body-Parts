@@ -98,15 +98,15 @@ class PoseNet(nn.Module):
             else:
                 hg_feats = [hg_feats[s] + feat_caches[s] for s in range(self.num_scales)]
 
-            feats_instack = se_block(hg_feats)  # > 5 scales
+            feats_instack = se_block(hg_feats)  # > 5 convs -> 5 scales
 
-            for s, head in zip(range(self.num_scales), out_blocks):  # handle 5 scales of heatmaps
+            for s, feats, head in zip(range(self.num_scales), feats_instack, out_blocks):  # handle 5 scales of heatmaps
                 # > outs/bottlenecks: 1x1 conv layer * 5
-                pred_out = head(feats_instack[s])
+                pred_out = head(feats)
                 preds_instack.append(pred_out)
 
                 if t != self.num_stages - 1:
-                    cache = self.merge_preds[t][s](pred_out) + self.merge_features[t][s](feats_instack[s])
+                    cache = self.merge_preds[t][s](pred_out) + self.merge_features[t][s](feats)
                     if s == 0:
                         x = x + cache
                     feat_caches[s] = cache
@@ -143,9 +143,9 @@ class Network(torch.nn.Module):
     """
     def __init__(self, opt, config, bn=False, dist=False, swa=False):
         super(Network, self).__init__()
-        self.posenet = PoseNet(opt.nstack,
-                               opt.hourglass_inp_dim,
-                               config.num_layers,
+        self.posenet = PoseNet(num_stages=opt.nstack,
+                               inp_dim=opt.hourglass_inp_dim,
+                               oup_dim=config.num_layers,
                                bn=bn,
                                increase=opt.increase)
         # If we use train_parallel, we implement the parallel loss . And if we use train_distributed,

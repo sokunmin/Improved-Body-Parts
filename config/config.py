@@ -19,7 +19,7 @@ class TrainingOpt:
     multi_task_weight = 0.1  # person mask loss vs keypoint loss
     keypoint_task_weight = 3  # keypoint heatmap loss vs body part heatmap loss
     # Download the pre-trained model snapshotted at epoch 52 first.
-    ckpt_path = './weights/epoch_52.pth'
+    ckpt_path = './weights/simplepose_imhn_epoch52.pth'
 
 
 class TransformationParams:
