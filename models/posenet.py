@@ -8,6 +8,7 @@ from models.layers_transposed import Conv, Hourglass, SELayer, Backbone
 from models.loss_model_parallel import MultiTaskLossParallel
 from models.loss_model import MultiTaskLoss
 from torchvision.models import densenet
+from thop import profile
 
 
 class Merge(nn.Module):
@@ -37,7 +38,13 @@ class Features(nn.Module):
 
     def forward(self, fms):
         assert len(fms) == 5, "hourglass output {} tensors,but 5 scale heatmaps are supervised".format(len(fms))
-        return [self.before_regress[i](fms[i]) for i in range(5)]
+        outs = []
+        for i, f, before_regress in zip(range(5), fms, self.before_regress):
+            out = before_regress(f)
+            outs.append(out)
+        return outs
+        # > orig
+        # return [self.before_regress[i](fms[i]) for i in range(5)]
 
 
 class PoseNet(nn.Module):
@@ -87,18 +94,18 @@ class PoseNet(nn.Module):
         pred = []
         feat_caches = [[]] * self.num_scales
         # loop over stack
-        for t, hg, se_block, out_blocks in \
+        for t, hg, se_blocks, out_blocks in \
                 zip(range(self.num_stages), self.hourglass, self.features, self.outs):  # > 4
             preds_instack = []
             # -> (0:256, 1:384, 2:512, 3:640, 4:786)
-            hg_feats = hg(x)  # -> 5 scales of feature maps
+            hg_outs = hg(x)  # -> 5 scales of feature maps
 
             if t == 0:  # cache for smaller feature maps produced by hourglass block
-                feat_caches = [torch.zeros_like(hg_feats[s]) for s in range(self.num_scales)]
+                feat_caches = [torch.zeros_like(hg_outs[s]) for s in range(self.num_scales)]
             else:
-                hg_feats = [hg_feats[s] + feat_caches[s] for s in range(self.num_scales)]
+                hg_outs = [hg_outs[s] + feat_caches[s] for s in range(self.num_scales)]
 
-            feats_instack = se_block(hg_feats)  # > 5 convs -> 5 scales
+            feats_instack = se_blocks(hg_outs)  # > 5 convs -> 5 scales
 
             for s, feats, head in zip(range(self.num_scales), feats_instack, out_blocks):  # handle 5 scales of heatmaps
                 # > outs/bottlenecks: 1x1 conv layer * 5
@@ -198,18 +205,18 @@ class NetworkEval(torch.nn.Module):
 if __name__ == '__main__':
     from time import time
 
-    pose = PoseNet(4, 256, 54, bn=True)  # .cuda()
-    for param in pose.parameters():
-        if param.requires_grad:
-            print('param autograd')
-            break
-
+    # model = PoseNet(4, 256, 50, bn=True, increase=128)  # .cuda()
+    # for param in model.parameters():
+    #     if param.requires_grad:
+    #         print('param autograd')
+    #         break
+    model = Backbone()
     t0 = time()
-    input = torch.rand(1, 128, 128, 3)  # .cuda()
-    print(pose)
-    output = pose(input)  # type: torch.Tensor
+    input = torch.rand(1, 512, 512, 3)  # .cuda()
+    print(model)
+    total_ops, total_params = profile(model, inputs=(input,))
+    print("%s | %.2f | %.2f" % ('SimplePose', total_params / (1000 ** 2), total_ops / (1000 ** 3)))
 
-    output[0][0].sum().backward()
 
     t1 = time()
     print('********** Consuming Time is: {} second  **********'.format(t1 - t0))

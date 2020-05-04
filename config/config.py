@@ -120,7 +120,7 @@ class CanonicalConfig:
                             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
                             2, 5, 8, 12, 11, 9, 2, 5, 11]]
 
-        self.limbs_conn = list(zip(self.limb_from, self.limb_to))
+        self.limbs_conn = np.array(list(zip(self.limb_from, self.limb_to)))
 
         self.paf_layers = len(self.limbs_conn)  # > 30
         self.heat_layers = self.num_parts  # > 18 (no bg)

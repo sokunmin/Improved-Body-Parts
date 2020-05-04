@@ -11,21 +11,21 @@ import PIL.Image
 
 def getJetColor(v, vmin, vmax):
     c = np.zeros((3))
-    if (v < vmin):
+    if v < vmin:
         v = vmin
-    if (v > vmax):
+    if v > vmax:
         v = vmax
     dv = vmax - vmin
-    if (v < (vmin + 0.125 * dv)):
+    if v < (vmin + 0.125 * dv):
         c[0] = 256 * (0.5 + (v * 4))  # B: 0.5 ~ 1
-    elif (v < (vmin + 0.375 * dv)):
+    elif v < (vmin + 0.375 * dv):
         c[0] = 255
         c[1] = 256 * (v - 0.125) * 4  # G: 0 ~ 1
-    elif (v < (vmin + 0.625 * dv)):
+    elif v < (vmin + 0.625 * dv):
         c[0] = 256 * (-4 * v + 2.5)  # B: 1 ~ 0
         c[1] = 255
         c[2] = 256 * (4 * (v - 0.375))  # R: 0 ~ 1
-    elif (v < (vmin + 0.875 * dv)):
+    elif v < (vmin + 0.875 * dv):
         c[1] = 256 * (-4 * v + 3.5)  # G: 1 ~ 0
         c[2] = 255
     else:
@@ -54,7 +54,7 @@ def padRightDownCorner(img, stride, padValue):
     img_padded = img
     pad_up = np.tile(img_padded[0:1, :, :] * 0 + padValue, (pad[0], 1, 1))
     img_padded = np.concatenate((pad_up, img_padded), axis=0)
-    # 注意! concatenate 两个数组的顺序很重要
+    # NOTE: concatenate 两个数组的顺序很重要
     pad_left = np.tile(img_padded[:, 0:1, :] * 0 + padValue, (1, pad[1], 1))
     img_padded = np.concatenate((pad_left, img_padded), axis=1)
     pad_down = np.tile(img_padded[-2:-1, :, :] * 0 + padValue, (pad[2], 1, 1))
@@ -179,7 +179,7 @@ def keypoint_heatmap_nms(heat, kernel=3, thre=0.1):
     pad = (kernel - 1) // 2  # > 1
     # > `heat`: (1, 18, imgH, imgW) -> (1, 18, imgH+2, imgW+2)
     pad_heat = F.pad(heat, (pad, pad, pad, pad), mode='reflect')
-    # > (1, 18, imgH+2, imgW+2) -> (3x3) maxpool
+    # > (1, 18, imgH+2, imgW+2) -> (3x3) maxpool -> (1, 18, imgH+2, imgW+2)
     hmax = F.max_pool2d(pad_heat, (kernel, kernel), stride=1, padding=0)
     keep = (hmax == heat).float() * (heat >= thre).float()
     return heat * keep

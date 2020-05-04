@@ -3,7 +3,7 @@ from torch import nn
 from torch.autograd import Function
 import sys
 import time
-import numpy as np
+from thop import profile
 import cv2
 import torch
 import torch.nn.functional as F
@@ -257,19 +257,19 @@ class Hourglass(nn.Module):
         :return: output tensor through an hourglass block
         """
         up1 = self.hg[depth_id][0](x)
-        low1 = self.downsample(x)
-        low1 = self.hg[depth_id][1](low1)
+        down1 = self.downsample(x)
+        down1 = self.hg[depth_id][1](down1)
         if depth_id == (self.depth - 1):  # except for the highest-order hourglass block
-            low2 = self.hg[depth_id][4](low1)
+            down2 = self.hg[depth_id][4](down1)
         else:
             # call the lower-order hourglass block recursively
-            low2 = self._hour_glass_forward(depth_id + 1, low1, up_fms)
-        low3 = self.hg[depth_id][2](low2)
-        up_fms.append(low2)
+            down2 = self._hour_glass_forward(depth_id + 1, down1, up_fms)
+        down3 = self.hg[depth_id][2](down2)
+        up_fms.append(down2)
         # ######################## # if we don't consider 8*8 scale
         # if depth_id < self.depth - 1:
         #     self.up_fms.append(low2)
-        up2 = self.upsample(low3)
+        up2 = self.upsample(down3)
         deconv1 = self.hg[depth_id][3](up2)
         # deconv2 = self.hg[depth_id][4](deconv1)
         # up1 += deconv2
@@ -315,12 +315,15 @@ class SELayer(nn.Module):
 
 if __name__ == '__main__':
 
-    se = SELayer(256)
-    print(se)
-    dummy_input = torch.randn(8, 256, 128, 128)
-    out = se(dummy_input)
-    print(out.shape)
-    out.sum().backward()
+    model = Backbone()
+    t0 = time.time()
+    input = torch.rand(1, 3, 512, 512)  # .cuda()
+    print(model)
+    total_ops, total_params = profile(model, inputs=(input,))
+    print("%s | param=%.2f | ops=%.2f" % ('SimplePose', total_params / (1000 ** 2), total_ops / (1000 ** 3)))
+
+    t1 = time.time()
+    print('********** Consuming Time is: {} second  **********'.format(t1 - t0))
 
 
 

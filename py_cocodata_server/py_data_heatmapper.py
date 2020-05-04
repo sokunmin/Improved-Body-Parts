@@ -29,7 +29,10 @@ class Heatmapper:
         self.keypoint_gaussian_thre = config.transform_params.keypoint_gaussian_thre  # > 0.015
         self.limb_gaussian_thre = config.transform_params.limb_gaussian_thre   # > 0.015
         self.double_sigma2 = 2 * self.sigma * self.sigma  # > 2*σ^2 = 162  # TOCHECK: why?
-        self.gaussian_size = ceil((sqrt(-self.double_sigma2 * log(self.keypoint_gaussian_thre))) / config.stride) * 2  # TOCHECK: 14
+        self.gaussian_size = ceil(
+            (sqrt(
+                -self.double_sigma2 * log(self.keypoint_gaussian_thre)
+            )) / config.stride) * 2
         self.offset_size = self.gaussian_size // 2 + 1  # + 1  # offset vector range TOCHECK: 8
         self.thre = config.transform_params.paf_thre  # > 4
 
@@ -59,9 +62,9 @@ class Heatmapper:
         :return: Masked groundtruth heatmaps!
         """
         # print(joints.shape)  # 例如(3, 18, 3)，把每个main person作为图片的中心，但是依然可能会包括其他不同的人在这个裁剪后的图像中
-        heatmaps = np.zeros(self.config.parts_shape, dtype=np.float32)  # `config.parts_shape`: (128, 128, #layer=50)
-        # 此处的heatmap一共有57个channel，包含了heatmap以及paf以及背景channel。
-        # TOCHECK: 并且对heatmap初始化为0很重要，因为这样使得没有标注的区域是没有值的！
+        heatmaps = np.zeros(self.config.parts_shape, dtype=np.float32)  # `parts_shape`: (128, 128, #layer=50)
+        # 此处的heatmap一共有57个channel，包含了heatmap以及paf以及背景channel。并且对heatmap初始化为0很重要，因为这样使得没有标注的区域是没有值的！
+        # > 50: PAF=30 + HEATMAP=(18 + 2)
         self.put_joints(heatmaps, joints)  # > `heatmaps`: (128, 128, 50), `joints`: (#obj, 18, 3)
         # sl = slice(self.config.heat_start, self.config.heat_start + self.config.heat_layers)
         # python切片函数　class slice(start, stop[, step])
@@ -104,7 +107,7 @@ class Heatmapper:
         #  TOCHECK: change `gaussian map` to `laplace map` to get a shapper peak of keypoint ?? the result is not good
         #   actually `exp(a+b) = exp(a) * exp(b)`, lets use it calculating 2d exponent, it could just be calculated by
         # > `joints`: (#visible_kp, (x,y))
-        for i in range(joints.shape[0]):  # > #visible <- 外层循环是对每一个joint都在对应类型channel的feature map上产生一个高斯分布
+        for i in range(joints.shape[0]):  # > #people <- 外层循环是对每一个joint都在对应类型channel的feature map上产生一个高斯分布
 
             # --------------------------------------------------------------------------------------------------#
             # 这里是个技巧，`grid_x`其实取值范围是`0~368`，起点是`3.5`，终点值是`363.5`，间隔为`8`，这样就是在原始`368`个位置上计算高斯值，
@@ -132,12 +135,21 @@ class Heatmapper:
             # slice can also crop the extended index of a numpy array and return empty array []
             slice_x = slice(x_min, x_max)
             slice_y = slice(y_min, y_max)
-            # > TOCHECK: `grid_x/grid_y`: (128,), `joints`: (#visible, (x,y)), `double_sigma2`: 162
-            exp_x = np.exp(-(self.grid_x[slice_x].astype(np.float32) - joints[i, 0]) ** 2 /
-                           np.array([self.double_sigma2]).astype(np.float32))  # > #pixel of disk
-            exp_y = np.exp(-(self.grid_y[slice_y].astype(np.float32) - joints[i, 1]) ** 2 /
-                           np.array([self.double_sigma2]).astype(np.float32))  # > #pixel of disk
-            # > TOCHECK:
+            # > `grid_x/grid_y`: (128,), `joints`: (#visible, (x,y)), `double_sigma2`: 162
+            e2 = np.array([self.double_sigma2]).astype(np.float32)
+            # > exp function property: exp(a+b) = exp(a) * exp(b)
+            exp_x = np.exp(-(self.grid_x[slice_x].astype(np.float32) - joints[i, 0]) ** 2 / e2)  # > #pixel of disk
+            exp_y = np.exp(-(self.grid_y[slice_y].astype(np.float32) - joints[i, 1]) ** 2 / e2)  # > #pixel of disk
+            """ outer product
+             ``a = [a0, a1, ..., aM]`` and
+                ``b = [b0, b1, ..., bN]``,
+                the outer product [1]_ is::
+            
+                  [[a0*b0  a0*b1 ... a0*bN ]
+                   [a1*b0    .
+                   [ ...          .
+                   [aM*b0            aM*bN ]]
+            """
             exp = np.outer(exp_y, exp_x)  # > (#pixel, #pixel): np.outer的计算，两个长度为M,N的向量的外积结果是M*N的矩阵
             # --------------------------------------------------------------------------------------------------#
 
@@ -218,7 +230,9 @@ class Heatmapper:
             slice_x = slice(min_sx, max_sx + 1)
             slice_y = slice(min_sy, max_sy + 1)
             # tt = self.X[slice_y,slice_x]
-            dist = distances(self.X[slice_y, slice_x], self.Y[slice_y, slice_x], self.paf_sigma, x1, y1, x2, y2,
+            dist = distances(self.X[slice_y, slice_x],
+                             self.Y[slice_y, slice_x],
+                             self.paf_sigma, x1, y1, x2, y2,
                              self.limb_gaussian_thre)
             # 这里求的距离是在原始尺寸368*368的尺寸，而不是缩小8倍后在46*46上的距离，然后放到46*46切片slice的位置上去
             # print(dist.shape)
