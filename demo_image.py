@@ -279,11 +279,15 @@ def find_humans(connection_limbs, joint_list, special_k):
     person_to_joint_assoc = -1 * np.ones((0, 20, 2))
     joint_candidates = np.array([item for sublist in joint_list for item in sublist])
 
+    len_rate = params['len_rate']
+    connection_tole = params['connection_tole']
+    remove_recon = params['remove_recon']
+
     for limb_type in range(len(joint2limb_pairs)):
         if limb_type not in special_k:  # 即　有與之相連的，這個paf(limb)是存在的
             joint_src_type, joint_dst_type = joint2limb_pairs[limb_type]
 
-            for limb_id, limb_info in enumerate(connection_limbs[limb_type]):  # 該層循環是分配k類型的limb connection　(partAs[i],partBs[i])到某個人　subset[]
+            for limb_id, limb_info in enumerate(connection_limbs[limb_type]):
 
                 limb_src_peak_id = limb_info[0]
                 limb_dst_peak_id = limb_info[1]
@@ -293,7 +297,7 @@ def find_humans(connection_limbs, joint_list, special_k):
                 person_assoc_idx = []
                 for person_id, person_limbs in enumerate(person_to_joint_assoc):
                     if person_limbs[joint_src_type, 0].astype(int) == limb_src_peak_id.astype(int) or \
-                        person_limbs[joint_dst_type, 0].astype(int) == limb_dst_peak_id.astype(int):
+                       person_limbs[joint_dst_type, 0].astype(int) == limb_dst_peak_id.astype(int):
                         person_assoc_idx.append(person_id)
 
                 if len(person_assoc_idx) == 1:
@@ -303,33 +307,35 @@ def find_humans(connection_limbs, joint_list, special_k):
                     person_dst_connect_score = person_limbs[joint_dst_type, 1]
                     person_limb_len = person_limbs[-1, 1]
 
-                    if person_dst_peak_id.astype(int) == -1 and \
-                            params['len_rate'] * person_limb_len > limb_len:
-                        person_limbs[joint_dst_type][0] = limb_dst_peak_id  # partBs[i]是limb其中一個端點的id號碼
-                        person_limbs[joint_dst_type][1] = limb_info[2]  # 保存這個點被留下來的置信度
+                    # dst joint is connected yet.
+                    if person_dst_peak_id.astype(int) == -1 and len_rate * person_limb_len > limb_len:
+                        person_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
                         person_limbs[-1][0] += 1  # last number in each row is the total parts number of that person
-
                         person_limbs[-2][0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
                         person_limbs[-1][1] = max(limb_len, person_limb_len)
                         # the second last number in each row is the score of the overall configuration
 
+                    # dst joint is connected, but peak_id is not same.
                     elif person_dst_peak_id.astype(int) != limb_dst_peak_id.astype(int):
+                        # prev score is higher than current one.
                         if person_dst_connect_score >= limb_connect_score:
                             pass
-
-                        else:
-                            if params['len_rate'] * person_limb_len <= limb_len:
+                        else:  # prev score is lower than current one
+                            # TOCHECK: prev limb x 16 is shorter than current limb, then do nothing.
+                            if len_rate * person_limb_len <= limb_len:
                                 continue
-                            person_limbs[-2][0] -= joint_candidates[person_dst_peak_id.astype(int), 2] + person_dst_connect_score
 
+                            person_limbs[-2][0] -= joint_candidates[person_dst_peak_id.astype(int), 2] + person_dst_connect_score
                             person_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
                             person_limbs[-2][0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
 
                             person_limbs[-1][1] = max(limb_len, person_limb_len)
 
+                    # dst joint is connected, and peak_id is same, but prev score is lower than current one.
                     elif person_dst_peak_id.astype(int) == limb_dst_peak_id.astype(int) and \
                          person_dst_connect_score <= limb_connect_score:
-                        if params['len_rate'] * person_limb_len <= limb_len:
+                        # TOCHECK: why compare length?
+                        if len_rate * person_limb_len <= limb_len:
                             continue
                         person_limbs[-2][0] -= joint_candidates[person_dst_peak_id.astype(int), 2] + person_dst_connect_score
                         person_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
@@ -349,25 +355,25 @@ def find_humans(connection_limbs, joint_list, special_k):
 
                         min_limb1 = np.min(person1_limbs[:-2, 1][membership1 == 1])
                         min_limb2 = np.min(person2_limbs[:-2, 1][membership2 == 1])
-                        min_tolerance = min(min_limb1, min_limb2)  # 計算允許進行拼接的置信度
+                        min_tolerance = min(min_limb1, min_limb2)
 
-                        if limb_connect_score < params['connection_tole'] * min_tolerance or \
-                                params['len_rate'] * person1_limbs[-1][1] <= limb_len:
+                        if limb_connect_score < connection_tole * min_tolerance or \
+                                len_rate * person1_limbs[-1][1] <= limb_len:
                             continue  #
 
                         person1_limbs[:-2][...] += (person2_limbs[:-2][...] + 1)
-                        person1_limbs[-2:][:, 0] += person2_limbs[-2:][:, 0]  # 兩行subset的點的個數和總置信度相加
+                        person1_limbs[-2:][:, 0] += person2_limbs[-2:][:, 0]
                         person1_limbs[-2][0] += limb_connect_score
                         person1_limbs[-1][1] = max(limb_len, person1_limbs[-1, 1])
                         person_to_joint_assoc = np.delete(person_to_joint_assoc, person2_id, 0)
 
                     else:
-                        if limb_info[0] in person1_limbs[:-2, 0]:
-                            c1 = np.where(person1_limbs[:-2, 0] == limb_info[0])
-                            c2 = np.where(person2_limbs[:-2, 0] == limb_info[1])
+                        if limb_src_peak_id in person1_limbs[:-2, 0]:
+                            c1 = np.where(person1_limbs[:-2, 0] == limb_src_peak_id)
+                            c2 = np.where(person2_limbs[:-2, 0] == limb_dst_peak_id)
                         else:
-                            c1 = np.where(person1_limbs[:-2, 0] == limb_info[1])
-                            c2 = np.where(person2_limbs[:-2, 0] == limb_info[0])
+                            c1 = np.where(person1_limbs[:-2, 0] == limb_dst_peak_id)
+                            c2 = np.where(person2_limbs[:-2, 0] == limb_src_peak_id)
 
                         c1 = int(c1[0])
                         c2 = int(c2[0])
@@ -385,7 +391,7 @@ def find_humans(connection_limbs, joint_list, special_k):
                             small_j = person2_id
                             big_j = person1_id
                             remove_c = c2
-                        if params['remove_recon'] > 0:
+                        if remove_recon > 0:
                             person_to_joint_assoc[small_j, -2, 0] -= \
                                 joint_candidates[person_to_joint_assoc[small_j, remove_c, 0].astype(int), 2] + \
                                 person_to_joint_assoc[small_j, remove_c, 1]
@@ -399,8 +405,6 @@ def find_humans(connection_limbs, joint_list, special_k):
                     row[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
                     row[-1] = [2, limb_len]
                     row[-2][0] = sum(joint_candidates[limb_info[:2].astype(int), 2]) + limb_connect_score
-                    # 兩個端點的置信度+limb連接的置信度
-                    # print('create a new subset:  ', row, '\t')
                     row = row[np.newaxis, :, :]  # 為了進行concatenate，需要插入一個軸
                     person_to_joint_assoc = np.concatenate((person_to_joint_assoc, row), axis=0)
 
