@@ -2,28 +2,21 @@
 Hint: please ingore the chinease annotations whcih may be wrong and they are just remains from old version.
 """
 
-import sys
-
-import math
-import numpy as np
-from itertools import product
-import tqdm
-import time
-import cv2
-import torch
-from pycocotools.coco import COCO
-from pycocotools.cocoeval import COCOeval
-from utils.config_reader import config_reader
-from utils import util
-from config.config import GetConfig, COCOSourceConfig, TrainingOpt
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from models.posenet import NetworkEval
-import warnings
-import os
 import argparse
-from apex import amp
-from skimage import io
+import math
+import os
+import time
+import warnings
+
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from config.config import GetConfig, TrainingOpt
+from models.posenet import NetworkEval
+from utils import util
+from utils.config_reader import config_reader
 
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"  # choose the available GPUs
 warnings.filterwarnings("ignore")
@@ -34,9 +27,9 @@ colors = [[128, 114, 250], [130, 238, 238], [48, 167, 238], [180, 105, 255], [25
           [0, 170, 255], [0, 85, 255], [0, 0, 255], [85, 0, 255], [170, 0, 255], [255, 0, 255], [255, 0, 170],
           [255, 0, 85], [193, 193, 255], [106, 106, 255], [20, 147, 255]]
 
+torch.cuda.empty_cache()
 parser = argparse.ArgumentParser(description='PoseNet Training')
 parser.add_argument('--resume', '-r', action='store_true', default=True, help='resume from checkpoint')
-parser.add_argument('--checkpoint_path', '-p', default='checkpoints_parallel', help='save path')
 parser.add_argument('--max_grad_norm', default=5, type=float,
                     help="If the norm of the gradient vector exceeds this, re-normalize it to have the norm equal to max_grad_norm")
 parser.add_argument('--image', type=str, default='try_image/3_p.jpg', help='input image')  # required=True
@@ -51,7 +44,7 @@ args = parser.parse_args()
 opt = TrainingOpt()
 config = GetConfig(opt.config_name)
 
-limb_pairs = config.limbs_conn  # > 30
+joint2limb_pairs = config.limbs_conn
 dt_gt_mapping = config.dt_gt_mapping
 flip_heat_ord = config.flip_heat_ord
 flip_paf_ord = config.flip_paf_ord
@@ -60,571 +53,378 @@ draw_list = config.draw_list
 
 # ###############################################################################################################
 def process(input_image_path, params, model_params, heat_layers, paf_layers):
-    oriImg = cv2.imread(input_image_path)  # B,G,R order.    训练数据的读入也是用opencv，因此也是B, G, R顺序
+    oriImg = cv2.imread(input_image)  # B,G,R order.    訓練數據的讀入也是用opencv，因此也是B, G, R順序
     img_h, img_w, _ = oriImg.shape
-    torch.cuda.empty_cache()
-    heatmap, paf = predict(oriImg, params, model_params, heat_layers, paf_layers, input_image_path)
-    end = time.time()  # ############# Evaluating the keypoint assignment algorithm ######
+    heatmaps, pafs = predict(oriImg, params, model_params, heat_layers, paf_layers, input_image_path)
+    show_color_vector(oriImg, pafs, heatmaps)
+    joint_list = find_peaks(heatmaps)
+    connection_limbs, special_k = find_connections(joint_list, pafs, img_w)
+    person_to_joint_assoc, joint_candidates = postprocess(connection_limbs, joint_list, special_k)
 
-    show_color_vector(oriImg, paf, heatmap)
-
-    all_peaks = find_peaks(heatmap, params)
-    connection_all, special_k = find_connections(all_peaks, paf, oriImg.shape[0], params)
-    subset, candidate = find_people(connection_all, special_k, all_peaks, params)
-
+    canvas = cv2.imread(input_image)  # B,G,R order
+    # canvas = oriImg
     keypoints = []
-    # > `subset`: (#person, 20, 2)，MY-TODO 收集了屬於各個人物的keypoints
-    for s in subset[..., 0]:   # > (#person, 20) -> #person
-        keypoint_indexes = s[:18]  # 定义的keypoint一共有18个
-        person_keypoint_coordinates = []  # > (#kp, (x,y))
-        for index in keypoint_indexes:  # > (#kp,) -> kp_idx
+
+    for s in person_to_joint_assoc[..., 0]:
+        keypoint_indexes = s[:18]  # 定義的keypoint一共有18個
+        person_keypoint_coordinates = []
+        for index in keypoint_indexes:
             if index == -1:
-                # "No candidate for keypoint" # 标志为-1的part是没有检测到的
+                # "No candidate for keypoint" # 標誌為-1的part是沒有檢測到的
                 X, Y = 0, 0
             else:
-                # > `candidate`: (#kp * #person, (x,y,score,id))
-                X, Y = candidate[index.astype(int)][:2]
+                X, Y = joint_candidates[index.astype(int)][:2]
             person_keypoint_coordinates.append((X, Y))
         person_keypoint_coordinates_coco = [None] * 17
-        # > TOCHECK: why use custom pairs instead of using coco pairs?
+
         for dt_index, gt_index in dt_gt_mapping.items():
             if gt_index is None:
                 continue
-            person_keypoint_coordinates_coco[gt_index] = person_keypoint_coordinates[dt_index] # > (x,y)
+            person_keypoint_coordinates_coco[gt_index] = person_keypoint_coordinates[dt_index]
 
-        # TOCHECK: 1-(1/x)?,
-        # s[18] is the score, s[19] is the number of keypoint
-        keypoints.append((person_keypoint_coordinates_coco, 1 - 1.0 / s[-2]))  # `s[19]` is the score
+        keypoints.append((person_keypoint_coordinates_coco, 1 - 1.0 / s[-2]))  # s[19] is the score
 
-    for person_idx in range(len(keypoints)):  # > #person, `keypoints`: (#person, 2, #kp)
-        print('the {}th keypoint detection result is : '.format(person_idx), keypoints[person_idx])
+    for i in range(len(keypoints)):
+        print('the {}th keypoint detection result is : '.format(i), keypoints[i])
 
-    canvas = cv2.imread(input_image_path)  # B,G,R order
-    # canvas = oriImg
-
-    # 画所有的峰值
-    # for i in range(18):
-    #     #     rgba = np.array(cmap(1 - i/18. - 1./36))
-    #     #     rgba[0:3] *= 255
-    #     for j in range(len(all_peaks[i])):  # all_peaks保存了坐标，score以及id
-    #         # 注意x,y坐标谁在前谁在后，在这个project中有点混乱
-    #         cv2.circle(canvas, all_peaks[i][j][0:2], 3, colors[i], thickness=-1)
-
-    # 画所有的骨架
+    # 畫所有的骨架
     color_board = [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
     color_idx = 0
-    for limb_idx in draw_list:  # 画出18个limb　Fixme：我设计了25个limb,画的limb顺序需要调整，相应color数也要增加
-        for person_idx in range(len(subset)):  # > `subset`: (#person, 20, 2) -> #person
-            # `subset` -> person_idx -> limb_pairs -> pair_idx -> `candidate` -> pair location
-            limb_pair = np.array(limb_pairs[limb_idx])  # > (kp_idx1, kp_idx2)
-            index = subset[person_idx][limb_pair][..., 0]  # > (2, 2) -> (2,)
-            if -1 in index:  # 有-1说明没有对应的关节点与之相连,即有一个类型的part没有缺失，无法连接成limb
+    for i in draw_list:  # 畫出18個limb　Fixme：我設計了25個limb,畫的limb順序需要調整，相應color數也要增加
+        for n in range(len(person_to_joint_assoc)):
+            index = person_to_joint_assoc[n][np.array(joint2limb_pairs[i])][..., 0]
+            if -1 in index:  # 有-1說明沒有對應的關節點與之相連,即有一個類型的part沒有缺失，無法連接成limb
                 continue
-            # 在上一个cell中有　canvas = cv2.imread(test_image) # B,G,R order
+            # 在上一個cell中有　canvas = cv2.imread(test_image) # B,G,R order
             cur_canvas = canvas.copy()
-            # > `candidate`: (#kp * #person, (x,y,score,id))
-            Y = candidate[index.astype(int), 0]  # > TOCHECK: (2,), isn't it `x` rather than `y`?
-            X = candidate[index.astype(int), 1]  # > TOCHECK: (2,)
+            Y = joint_candidates[index.astype(int), 0]
+            X = joint_candidates[index.astype(int), 1]
             mX = np.mean(X)
             mY = np.mean(Y)
-            length = ((X[0] - X[1]) ** 2 + (Y[0] - Y[1]) ** 2) ** 0.5  # TOCHECK: ??
+            length = ((X[0] - X[1]) ** 2 + (Y[0] - Y[1]) ** 2) ** 0.5
             angle = math.degrees(math.atan2(X[0] - X[1], Y[0] - Y[1]))
-            # > SEE: bit.ly/2VvPaVt
-            polygon = cv2.ellipse2Poly(center=(int(mY), int(mX)), axes=(int(length / 2), 3),
-                                       angle=int(angle), arcStart=0, arcEnd=360, delta=1)
+            polygon = cv2.ellipse2Poly((int(mY), int(mX)), (int(length / 2), 3), int(angle), 0,
+                                       360, 1)
 
-            cv2.circle(cur_canvas, center=(int(Y[0]), int(X[0])), radius=4, color=[0, 0, 0], thickness=2)
-            cv2.circle(cur_canvas, center=(int(Y[1]), int(X[1])), radius=4, color=[0, 0, 0], thickness=2)
+            cv2.circle(cur_canvas, (int(Y[0]), int(X[0])), 4, color=[0, 0, 0], thickness=2)
+            cv2.circle(cur_canvas, (int(Y[1]), int(X[1])), 4, color=[0, 0, 0], thickness=2)
             cv2.fillConvexPoly(cur_canvas, polygon, colors[color_board[color_idx]])
             canvas = cv2.addWeighted(canvas, 0.4, cur_canvas, 0.6, 0)
         color_idx += 1
     return canvas
+    return canvas
 
 
-def predict(image, params, model_params, heat_layers, paf_layers, input_image_path):
-    # > scale feature maps up to image size
-    img_h, img_w, _ = image.shape
-    heatmap_avg = np.zeros((img_h, img_w, heat_layers))  # > `heatmap_avg`: (imgH, imgW, 20)
-    paf_avg = np.zeros((img_h, img_w, paf_layers))  # > `paf_layers`: (imgH, imgW, 30)
-    multiplier = [x * model_params['boxsize'] / img_h for x in params['scale_search']]  # 按照图片高度进行缩放
-    rotate_angle = params['rotation_search']  # > ADDED
-    # > scale image to different sizes and then detect via model
-    # for item in product(multiplier, rotate_angle):  # > #scales
-    if len(multiplier) > 0:
-        # > orig
-        # scale, angle = item
-        # > DEBUG
-        scale = multiplier[1]
-        img_max_h, img_max_w = (2300, 3200)
-        if scale * img_h > img_max_h or scale * img_w > img_max_w:
-            scale = min(img_max_h / img_h, img_max_w / img_w)
-            print("Input image: '{}' is too big, shrink it!".format(input_image_path))
+def predict(oriImg, params, model_params, heat_layers, paf_layers, input_image_path):
+    multiplier = [x * model_params['boxsize'] / oriImg.shape[0] for x in params['scale_search']]  # 按照圖片高度進行縮放
 
-        # > `imageToTest`: (scaleH, scaleW, 3)
-        imageToTest = cv2.resize(image, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        # > `imageToTest_padded`: (scale_padH, scale_padW, 3)
+    heatmap_avg = np.zeros((oriImg.shape[0], oriImg.shape[1], heat_layers))  # fixme if you change the number of keypoints
+    paf_avg = np.zeros((oriImg.shape[0], oriImg.shape[1], paf_layers))
+
+    max_downsample = model_params['max_downsample']
+    pad_value = model_params['padValue']
+    stride = model_params['stride']
+
+    for m in range(len(multiplier)):
+        scale = multiplier[m]
+
+        if scale * oriImg.shape[0] > 2300 or scale * oriImg.shape[1] > 3200:
+            scale = min(2300 / oriImg.shape[0], 3200 / oriImg.shape[1])
+            print("Input image is too big, shrink it !")
+
+        imageToTest = cv2.resize(oriImg, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)  # cv2.INTER_CUBIC
         imageToTest_padded, pad = util.padRightDownCorner(imageToTest,
-                                                          model_params['max_downsample'],  # > 64
-                                                          model_params['padValue'])  # > 128
-        scale_padH, scale_padW, _ = imageToTest_padded.shape
+                                                          max_downsample,
+                                                          pad_value)
 
-        # > WARN: `[1-1]`: we use OpenCV to read image`(BGR)` all the time
-        # Input Tensor: a batch of images within [0,1], required shape in this project : (1, height, width, channels)
         input_img = np.float32(imageToTest_padded / 255)
-        # CHANGED: `rotate_angle` is ADDED
-        # > `[1-2]` :add flip image
         swap_image = input_img[:, ::-1, :].copy()
-        # plt.imshow(swap_image[:, :, [2, 1, 0]])  # Opencv image format: BGR
-        # plt.show()
-        input_img = np.concatenate((input_img[None, ...], swap_image[None, ...]), axis=0)  # (2, H, W, C)
+        input_img = np.concatenate((input_img[None, ...], swap_image[None, ...]), axis=0)  # (2, height, width, channels)
         input_img = torch.from_numpy(input_img).cuda()
-
-        # > `[1-3]-model`(4,)=(2, 50, featH, featW) x 4, `dtype=float16`
         output_tuple = posenet(input_img)
 
-        # > `[1-4]`: scales vary according to input image size.
-        output = output_tuple[-1][0].cpu().numpy()  # > `1st-level` of feature maps -> (2, 50, featH, featW)
+        # ############ different scales can be shown #############
+        output = output_tuple[-1][0].cpu().numpy()
 
-        output_blob = output[0].transpose((1, 2, 0))  # > (featH, featW, 50)
-        output_paf = output_blob[:, :, :config.paf_layers]  # > `PAF`:(featH, featW, 30)
-        output_kp = output_blob[:, :, config.paf_layers:config.num_layers]  # > `KP`:(featH, featW, 20)
-        # > flipped image output
-        output_blob_flip = output[1].transpose((1, 2, 0))  # > (featH, featW, 50)
-        output_paf_flip = output_blob_flip[:, :, :config.paf_layers]  # `PAF`: (featH, featW, 30)
-        output_kp_flip = output_blob_flip[:, :, config.paf_layers:config.num_layers]  # > `KP`: (featH, featW, 20)
+        output_blob = output[0].transpose((1, 2, 0))
+        output_paf = output_blob[:, :, :config.paf_layers]
+        output_heatmap = output_blob[:, :, config.paf_layers:config.num_layers]
 
-        # > `[1-5]`: flip ensemble
-        output_blob0_avg = (output_paf + output_paf_flip[:, ::-1, :][:, :, flip_paf_ord]) / 2  # > (featH, featW, 30)
-        output_blob1_avg = (output_kp + output_kp_flip[:, ::-1, :][:, :, flip_heat_ord]) / 2  # > (featH, featW, 20)
+        output_blob_flip = output[1].transpose((1, 2, 0))
+        output_paf_flip = output_blob_flip[:, :, :config.paf_layers]  # paf layers
+        output_heatmap_flip = output_blob_flip[:, :, config.paf_layers:config.num_layers]  # keypoint layers
+
+        # ################################## flip ensemble ################################
+        output_paf_avg = (output_paf + output_paf_flip[:, ::-1, :][:, :, flip_paf_ord]) / 2
+        output_heatmap_avg = (output_heatmap + output_heatmap_flip[:, ::-1, :][:, :, flip_heat_ord]) / 2
 
         # extract outputs, resize, and remove padding
-        # > `[1-6]-heatmap`: (featH, featW, 20) -> (scale_padH, scale_padW, 20)
-        heatmap = cv2.resize(output_blob1_avg, (0, 0),
-                             fx=model_params['stride'],  # > `stride`: 4
-                             fy=model_params['stride'],
+        heatmap = cv2.resize(output_heatmap_avg, (0, 0),
+                             fx=stride,
+                             fy=stride,
                              interpolation=cv2.INTER_CUBIC)
-        # -> (scaleH, scaleW, 20)
-        heatmap = heatmap[:scale_padH - pad[2], :scale_padW - pad[3], :]
-        # -> (imgH, imgW, 20)
-        heatmap = cv2.resize(heatmap, (img_w, img_h), interpolation=cv2.INTER_CUBIC)
+        heatmap = heatmap[:imageToTest_padded.shape[0] - pad[2], :imageToTest_padded.shape[1] - pad[3], :]
+        heatmap = cv2.resize(heatmap, (oriImg.shape[1], oriImg.shape[0]), interpolation=cv2.INTER_CUBIC)
 
-        # > `output_blob0` is PAFs
-        # > `[1-7]-paf`: (featH, featW, 30) -> (scale_padH, scale_padW, 30)
-        paf = cv2.resize(output_blob0_avg, (0, 0),
-                         fx=model_params['stride'],  # > `stride`: 4
-                         fy=model_params['stride'],
+        # output_blob0 is PAFs
+        paf = cv2.resize(output_paf_avg, (0, 0),
+                         fx=stride,
+                         fy=stride,
                          interpolation=cv2.INTER_CUBIC)
-        # -> (scaleH, scaleW, 30)
-        paf = paf[:scale_padH - pad[2], :scale_padW - pad[3], :]
-        # -> (imgH, imgW, 30)
-        paf = cv2.resize(paf, (img_w, img_h), interpolation=cv2.INTER_CUBIC)
+        paf = paf[:imageToTest_padded.shape[0] - pad[2], :imageToTest_padded.shape[1] - pad[3], :]
+        paf = cv2.resize(paf, (oriImg.shape[1], oriImg.shape[0]), interpolation=cv2.INTER_CUBIC)
 
-        # ##############################     为了让平均heatmap不那么模糊？     ################################
-        # heatmap[heatmap < params['thre1']] = 0
-        # paf[paf < params['thre2']] = 0
-        # ####################################################################################### #
-        # > `[1-8]-avg`: `heatmap_avg`: (imgH, imgW, 20), `paf_avg`: (imgH, imgW, 30)
         heatmap_avg = heatmap_avg + heatmap / len(multiplier)
         paf_avg = paf_avg + paf / len(multiplier)
         # > DELETED
         heatmap_avg[np.isnan(heatmap_avg)] = 0
         paf_avg[np.isnan(paf_avg)] = 0
 
-        # heatmap_avg = np.maximum(heatmap_avg, heatmap)
-        # paf_avg = np.maximum(paf_avg, paf)  # 如果换成取最大，效果会变差，有很多误检
-
     return heatmap_avg, paf_avg
 
 
-# > find & refine keypoints
-def find_peaks(heatmap_avg, params):
-    all_peaks = []
+def find_peaks(heatmap_avg):
+    joint_list = []
     peak_counter = 0
 
-    # TOCHECK: how does GaussianSmoothing work?
-    # smoothing = util.GaussianSmoothing(18, 5, 1)
-    # heatmap_avg_cuda = torch.from_numpy(heatmap_avg.transpose((2, 0, 1))).cuda()[None, ...]
-    # > `heatmap_avg`: (imgH, imgW, 20)
     heatmap_avg = heatmap_avg.astype(np.float32)
 
-    # > (imgH, imgW, 20) -> (imgH, imgW, 18) -> (18, imgH, imgW) -> (1, 18, imgH, imgW)
     filter_map = heatmap_avg[:, :, :18].copy().transpose((2, 0, 1))[None, ...]
     filter_map = torch.from_numpy(filter_map).cuda()
 
-    # TOCHECK: #######################   Add Gaussian smooth  #######################
-    # smoothing = util.GaussianSmoothing(18, 7, 1)
-    # filter_map = F.pad(filter_map, (3, 3, 3, 3), mode='reflect')
-    # filter_map = smoothing(filter_map)
-    # # ######################################################################
-    # > (1, 18, imgH, imgW), `thre1`: 0.1
     filter_map = util.keypoint_heatmap_nms(filter_map, kernel=3, thre=params['thre1'])
-    filter_map = filter_map.cpu().numpy().squeeze().transpose((1, 2, 0))  # > (imgH, imgW, 18)
-    # > `heatmap_avg`: (imgH, imgW, 20)
-    for part in range(18):  # > `#kp`: 没有对背景（序号19）取非极大值抑制NMS
-        map_ori = heatmap_avg[:, :, part]  # > (imgH, imgW)
-        # map = gaussian_filter(map_ori, sigma=3)  # 没有高斯滤波貌似效果更好？
-        # map = map_ori
-        # map up 是值
-        peaks_binary = filter_map[:, :, part]  # > (imgH, imgW)
-        peak_y, peak_x = np.nonzero(peaks_binary)
-        peaks = list(zip(peak_x, peak_y))  # note reverse: (#peaks, (y,x))
-        # note reverse. xy坐标系和图像坐标系
-        # `np.nonzero`: Return the indices of the elements that are non-zero
-        # 添加加权坐标计算，根据不同类型关键点弥散程度不同选择加权的范围, TOCHECK: `offset_radius`: 2, is this learnable? `refine_centroid()` -> (x,y,score)
+    filter_map = filter_map.cpu().numpy().squeeze().transpose((1, 2, 0))
+
+    for part in range(18):  # 沒有對背景（序號19）取非極大值抑制NMS
+        map_ori = heatmap_avg[:, :, part]
+        peaks_binary = filter_map[:, :, part]
+
+        peaks = list(zip(np.nonzero(peaks_binary)[1], np.nonzero(peaks_binary)[0]))
         refined_peaks_with_score = [util.refine_centroid(map_ori, anchor, params['offset_radius']) for anchor in peaks]
-        # peaks_with_score = [x + (map_ori[x[1], x[0]],) for x in peaks]  # 列表解析式，生产的是list  # refined_peaks
 
-        # > TOCHECK: `id`: [0, #peaks), `refined_peaks_with_score`: (#peaks, (x,y,score))
-        id = range(peak_counter, peak_counter + len(refined_peaks_with_score))  # TOCHECK: peak_id?
-
-        # > [(x,y,score) + (id,) = (x,y,score,id)] of `certain type` of keypoint.
-        # 为每一个相应peak (parts)都依次编了一个号
+        id = range(peak_counter, peak_counter + len(refined_peaks_with_score))
         peaks_with_score_and_id = [refined_peaks_with_score[i] + (id[i],) for i in range(len(id))]
 
-        # all_peaks.append 如果此种关节类型没有元素，append一个空的list []，例如all_peaks[19]:
-        all_peaks.append(peaks_with_score_and_id)
+        joint_list.append(peaks_with_score_and_id)
         peak_counter += len(peaks)  # refined_peaks
 
-    return all_peaks
+    return joint_list
 
 
-def find_connections(all_peaks, paf_avg, image_width, params):
-    connection_all = []  # > (#connect, 6=(A_peak_id, B_peak_id, dist_prior, partA_id, partB_id, limb_len))
+def find_connections(joint_list, paf_avg, img_width):
+
+    connection_limbs = []
     special_k = []
-    # > `#limb` = `#connection` = `#paf_channel`, `limb_pairs[i]`=(kp_id1, kp_id2)
-    # 有多少个limb,就有多少个connection,相对应地就有多少个paf channel
-    for pair_id in range(len(limb_pairs)):  # > 30 pairs, 最外层的循环是某一个limb_pairs，因为mapIdx个数与之是一致对应的
-        # 某一个channel上limb的响应热图, 它的长宽与原始输入图片大小一致，前面经过resize了
-        score_mid = paf_avg[:, :, pair_id]  # (imgH, imgW, 30) -> `c=k` -> (imgH, imgW)
-        # score_mid = gaussian_filter(orginal_score_mid, sigma=3)  # TOCHECK: fixme use gaussisan blure?
 
-        # `all_peaks(list)`: (#kp, #peaks, (x,y,score,id)), 每一行也是一个list,保存了检测到的特定的parts(joints)
-        candA = all_peaks[limb_pairs[pair_id][0]]  # > `all_peaks` -> `kp_id1` -> (x,y,score,id)
-        # 注意具体处理时标号从0还是1开始。从收集的peaks中取出某类关键点（part)集合
-        candB = all_peaks[limb_pairs[pair_id][1]]  # > `all_peaks` -> `kp_id2` -> (x,y,score,id)
-        nA = len(candA)  # > #person
-        nB = len(candB)  # > #person
-        indexA, indexB = limb_pairs[pair_id]  # > (kp_id1, kp_id2)
-        if nA != 0 and nB != 0:
+    for k in range(len(joint2limb_pairs)):  # 最外層的循環是某一個limbSeq
+        score_mid = paf_avg[:, :, k]  # 某一個channel上limb的響應熱圖, 它的長寬與原始輸入圖片大小一致，前面經過resize了
+        candA = joint_list[joint2limb_pairs[k][0]]  # all_peaks是list,每一行也是一個list,保存了檢測到的特定的parts(joints)
+        candB = joint_list[joint2limb_pairs[k][1]]
+        nA = len(candA)
+        nB = len(candB)
+        indexA, indexB = joint2limb_pairs[k]
+        if (nA != 0 and nB != 0):
             connection_candidate = []
-            # TOCHECK: map `kp1` to `kp2` of certain pair from person to person
-            for person_idx in range(nA):  # > #person
-                for candB_id in range(nB):  # > #person
-                    vec = np.subtract(candB[candB_id][:2], candA[person_idx][:2])  # > (x,y)
-                    limb_len = math.sqrt(vec[0] * vec[0] + vec[1] * vec[1])  # > `limb_len`: scalar
-                    mid_num = min(int(round(limb_len + 1)), params['mid_num'])  # > `mid_num`: 20, TOCHECK: `mid_num`?
-                    # TOCHECK: failure case when 2 body parts overlaps
-                    if limb_len == 0:  # TOCHECK: 为了跳过出现不同节点相互覆盖出现在同一个位置，也有说norm加一个接近0的项避免分母为0
-                        # SEE：https://github.com/ZheC/Realtime_Multi-Person_Pose_Estimation/issues/54
+            for i in range(nA):
+                for j in range(nB):
+                    vec = np.subtract(candB[j][:2], candA[i][:2])
+                    norm = math.sqrt(vec[0] * vec[0] + vec[1] * vec[1])
+                    mid_num = min(int(round(norm + 1)), params['mid_num'])
+                    if norm == 0:  # 為了跳過出現不同節點相互覆蓋出現在同一個位置，也有說norm加一個接近0的項避免分母為0,詳見：
+                        # https://github.com/ZheC/Realtime_Multi-Person_Pose_Estimation/issues/54
                         continue
 
-                    # > TOCHECK: `candA/B[peak_id]`: (x,y,score,id) -> `startend`: (mid_num, (x,y))
-                    startend = list(zip(np.linspace(start=candA[person_idx][0], stop=candB[candB_id][0], num=mid_num),
-                                        np.linspace(start=candA[person_idx][1], stop=candB[candB_id][1], num=mid_num)))
+                    startend = list(zip(np.linspace(candA[i][0], candB[j][0], num=mid_num),
+                                        np.linspace(candA[i][1], candB[j][1], num=mid_num)))
 
-                    # limb_response 是代表某一个limb通道下的heat map响应
-                    # > `score_mid` of `paf_avg`: (imgH, imgW) -> `score_mid[y, x]` -> `limb_response`: (mid_num,)
-                    limb_response = np.array([score_mid[int(round(startend[I][1])), int(round(startend[I][0]))]
-                                              for I in range(len(startend))])  # > [0, ..., mid_num-1]
+                    limb_response = np.array([score_mid[int(round(startend[I][1])), int(round(startend[I][0]))] \
+                                              for I in range(len(startend))])
 
-                    score_midpts = limb_response  # > (mid_num,)
+                    score_midpts = limb_response
 
-                    # > TOCHECK: `score_with_dist_prior`: scalar
-                    score_with_dist_prior = sum(score_midpts) / len(score_midpts) + min(0.5 * image_width / limb_len - 1, 0)
-                    # 这一项是为了惩罚过长的connection, 只有当长度大于图像高度的一半时才会惩罚 todo
-                    # The term of sum(score_midpts)/len(score_midpts), see the link below.
-                    # https://github.com/michalfaber/keras_Realtime_Multi-Person_Pose_Estimation/issues/48
-                    # > `thre2`: 0.1, `connect_ration`: 0.8 -> `criterion1`: True/False
-                    criterion1 = len(np.nonzero(score_midpts > params['thre2'])[0]) > \
-                                 len(score_midpts) * params['connect_ration']  # CHANGED: (r > 0.8 * len) -> 0.7 or 0.8?
-                    # 我认为这个判别标准是保证paf朝向的一致性  param['thre2']
-                    # parm['thre2'] = 0.05
-                    criterion2 = score_with_dist_prior > 0  # > True/False
+                    score_with_dist_prior = sum(score_midpts) / len(score_midpts) + min(
+                        0.5 * img_width / norm - 1, 0)
+                    criterion1 = len(np.nonzero(score_midpts > params['thre2'])[0]) > params['connect_ration'] * len(
+                        score_midpts)  # fixme: tune 手動調整, 本來是 > 0.8*len
+                    criterion2 = score_with_dist_prior > 0
+
                     if criterion1 and criterion2:
-                        # > TOCHECK: [0.5, 0.25, 0.25] -> (candA_id, candB_id, dist_prior, limb_len, `confidence`)
-                        connection_candidate.append([person_idx, candB_id,  # TOCHECK cand_ID?
-                                                     score_with_dist_prior,  # > scalar
-                                                     limb_len,  # > scalar
-                                                     0.5 * score_with_dist_prior +
-                                                     0.25 * candA[person_idx][2] +
-                                                     0.25 * candB[candB_id][2]])
-                        # TOCHECK:直接把两种类型概率相加不合理
-                        # connection_candidate排序的依据是dist prior概率和两个端点heat map预测的概率值
-                        # How to understand the criterion?
+                        connection_candidate.append([i, j, score_with_dist_prior, norm,
+                                                     0.5 * score_with_dist_prior + 0.25 * candA[i][2] + 0.25 * candB[j][
+                                                         2]])
 
-            # sort by `confidence` -> (#person, (candA_id, candB_id, dist_prior, limb_len, `confidence`)) -> [max, ..., min]
             connection_candidate = sorted(connection_candidate, key=lambda x: x[4], reverse=True)
-            # sorted 函数对可迭代对象，按照key参数指定的对象进行排序，revers=True是按照逆序排序
-            # sort之后可以把最可能是limb的留下，而把和最可能是limb的端点竞争的端点删除
-
             connection = np.zeros((0, 6))
-            for c in range(len(connection_candidate)):  # 根据`confidence`的顺序选择connections
-                person_idx, candB_id, s, limb_len = connection_candidate[c][0:4]
-                if person_idx not in connection[:, 3] and candB_id not in connection[:, 4]:
-                    # 进行判断确保不会出现两个端点集合A,B中，出现一个集合中的点与另外一个集合中两个点同时相连
-                    connection = np.vstack([
-                        connection,
-                        # > (6,) = [`A_peak_id`, `B_peak_id`, `dist_prior`, `partA_id`, `partB_id`, `limb_len`]
-                        [candA[person_idx][3], candB[candB_id][3], s, person_idx, candB_id, limb_len]
-                    ])  # 后面会被使用
-                    # TOCHECK: candA[i][3], candB[j][3]是part的id编号
-                    if len(connection) >= min(nA, nB):  # 会出现关节点不够连的情况
+            for c in range(len(connection_candidate)):  # 根據confidence的順序選擇connections
+                i, j, s, limb_len = connection_candidate[c][0:4]
+                if (i not in connection[:, 3] and j not in connection[:, 4]):
+                    connection = np.vstack([connection, [candA[i][3], candB[j][3], s, i, j, limb_len]])  # 後面會被使用
+                    if (len(connection) >= min(nA, nB)):  # 會出現關節點不夠連的情況
                         break
-            connection_all.append(connection)
+            connection_limbs.append(connection)
         else:
-            # 一个空的[]也能加入到list中，这一句是必须的！因为connection_all的数据结构是每一行代表一类limb connection
-            special_k.append(pair_id)
-            connection_all.append([])
-
-    return connection_all, special_k
+            special_k.append(k)
+            connection_limbs.append([])
+    return connection_limbs, special_k
 
 
-def find_people(connection_all, special_k, all_peaks, params):
-    # last number in each row is the `total parts number of that person`
-    # the second last number in each row is `the score of the overall configuration`
-    subset = -1 * np.ones((0, 20, 2))
-    # `all_peaks` -> `candidate`: (#kp * person, (x,y,score,id))
-    candidate = np.array([item for sublist in all_peaks for item in sublist])
-    # candidate.shape = (94, 4). 列表解析式，两层循环，先从all peaks取，再从sublist中取。 all peaks是两层list
+def postprocess(connection_limbs, joint_list, special_k):
+    # --------------------------------------------------------------------------------------- #
+    # ####################################################################################### #
+    # --------------------------------- find people ------------------------------------------#
+    # ####################################################################################### #
+    # --------------------------------------------------------------------------------------- #
 
-    for pair_id in range(len(limb_pairs)):  # > #connect
-        # ---------------------------------------------------------
-        # 外层循环limb  对应论文中，每一个limb就是一个子集，分limb处理,贪心策略?
-        # special_K ,表示没有找到关节点对匹配的肢体
-        if pair_id not in special_k:  # 即　有与之相连的，这个paf(limb)是存在的
-            # > `connection_all`: (#connect, 6=(A_peak_id, B_peak_id, dist_prior, A_part_id, B_part_id, limb_len))
-            partAs = connection_all[pair_id][:, 0]  # TOCHECK: limb端点part的序号，也就是保存在candidate中的  id号
-            partBs = connection_all[pair_id][:, 1]  # TOCHECK: limb端点part的序号，也就是保存在candidate中的  id号
-            # connection_all 每一行是一个类型的limb, 每一行格式: N * [idA, idB, score, i, j]
-            indexA, indexB = np.array(limb_pairs[pair_id])  # 此时处理limb k,limb_pairs的两个端点parts，是parts的类别号.
-            #  根据limb_pairs列表的顺序依次考察某种类型的limb，从一个关节点到下一个关节点
-            # 该层循环是分配k类型的limb connection　(partAs[i],partBs[i])到某个人　subset[]
-            for person_idx in range(len(connection_all[pair_id])):
-                # connection_all[k]保存的是第k个类型的所有limb连接，可能有多个，也可能一个没有
-                # ------------------------------------------------
-                # 每一行的list保存的是一类limb(connection),遍历所有此类limb,一般的有多少个特定的limb就有多少个人
+    person_to_joint_assoc = -1 * np.ones((0, 20, 2))
+    joint_candidates = np.array([item for sublist in joint_list for item in sublist])
+
+    for k in range(len(joint2limb_pairs)):
+        if k not in special_k:  # 即　有與之相連的，這個paf(limb)是存在的
+            partAs = connection_limbs[k][:, 0]  # limb端點part的序號，也就是保存在candidate中的  id號
+            partBs = connection_limbs[k][:, 1]  # limb端點part的序號，也就是保存在candidate中的  id號
+            indexA, indexB = np.array(joint2limb_pairs[k])  # 此時處理limb k,limbSeq的兩個端點parts，是parts的類別號.
+
+            for i in range(len(connection_limbs[k])):  # 該層循環是分配k類型的limb connection　(partAs[i],partBs[i])到某個人　subset[]
 
                 found = 0
-                found_subset_idx = [-1, -1]  # 每次循环只解决两个part，所以标记只需要两个flag
-                for candB_id in range(len(subset)):  # > #person
-                    # ----------------------------------------------
-                    # 这一层循环是遍历所有的人
-
-                    # 1:size(subset,1), 若subset.shape=(5,20), 则len(subset)=5，表示有5个人
-                    # subset每一行对应的是 (一个人, 18个关键点, (number, score的结果)) = (#person, 18, 2) + (#person, 2, 2)
-                    if subset[candB_id][indexA][0].astype(int) == (partAs[person_idx]).astype(int) or \
-                       subset[candB_id][indexB][0].astype(int) == (partBs[person_idx]).astype(int):
-                        # 看看这次考察的limb两个端点之一是否有一个已经在上一轮中出现过了,即是否已经分配给某人了
-                        # 每一个最外层循环都只考虑一个limb，因此处理的时候就只会有两种part,即表示为partAs,partBs
-                        if found >= 2:  # > ADDED
-                            print('************ error occurs! 3 joints sharing have been found  *******************')
-                            continue
-                        found_subset_idx[found] = candB_id  # 标记一下，这个端点应该是第j个人的
+                subset_idx = [-1, -1]  # 每次循環只解決兩個part，所以標記只需要兩個flag
+                for j in range(len(person_to_joint_assoc)):
+                    if person_to_joint_assoc[j][indexA][0].astype(int) == (partAs[i]).astype(int) or person_to_joint_assoc[j][indexB][0].astype(
+                            int) == partBs[i].astype(int):
+                        subset_idx[found] = j  # 標記一下，這個端點應該是第j個人的
                         found += 1
 
-                # > `connectA`: (6,) = [A_peak_id, B_peak_id, dist_prior, partA_id, partB_id, limb_len]
-                connectA = connection_all[pair_id][person_idx]
-
                 if found == 1:
-                    candB_id = found_subset_idx[0]
-                    # > `len_rate`:16
-                    if subset[candB_id][indexB][0].astype(int) == -1 and \
-                       subset[candB_id][-1][1] * params['len_rate'] > connectA[-1]:
-                        # 如果新加入的limb比之前已经组装的limb长很多，也舍弃
-                        # 如果这个人的当前点还没有被找到时，把这个点分配给这个人
-                        # 这一个判断非常重要，因为第18和19个limb分别是 2->16, 5->17,这几个点已经在之前的limb中检测到了，
-                        # 所以如果两次结果一致，不更改此时的part分配，否则又分配了一次，编号是覆盖了，但是继续运行下面代码，part数目
-                        # 会加１，结果造成一个人的part之和>18。不过如果两侧预测limb端点结果不同，还是会出现number of part>18，造成多检
-                        # TOCHECK: 没有利用好冗余的connection信息，最后两个limb的端点与之前循环过程中重复了，但没有利用聚合，
-                        #  只是直接覆盖，其实直接覆盖是为了弥补漏检
+                    j = subset_idx[0]
 
-                        subset[candB_id][indexB][0] = partBs[person_idx]  # partBs[i]是limb其中一个端点的id号码
-                        subset[candB_id][indexB][1] = connectA[2]  # 保存这个点被留下来的置信度
-                        subset[candB_id][-1][0] += 1  # last number in each row is the total parts number of that person
+                    if person_to_joint_assoc[j][indexB][0].astype(int) == -1 and \
+                            params['len_rate'] * person_to_joint_assoc[j][-1][1] > connection_limbs[k][i][-1]:
+                        person_to_joint_assoc[j][indexB][0] = partBs[i]  # partBs[i]是limb其中一個端點的id號碼
+                        person_to_joint_assoc[j][indexB][1] = connection_limbs[k][i][2]  # 保存這個點被留下來的置信度
+                        person_to_joint_assoc[j][-1][0] += 1  # last number in each row is the total parts number of that person
 
-                        # # subset[j][-2][1]用来记录不包括当前新加入的类型节点时的总体初始置信度，引入它是为了避免下次迭代出现同类型关键点，覆盖时重复相加了置信度
-                        # subset[j][-2][1] = subset[j][-2][0]  # 因为是不包括此类节点的初始值，所以只会赋值一次 !!
-
-                        subset[candB_id][-2][0] += candidate[partBs[person_idx].astype(int), 2] + connectA[2]
-                        subset[candB_id][-1][1] = max(connectA[-1], subset[candB_id][-1][1])
-
+                        person_to_joint_assoc[j][-2][0] += joint_candidates[partBs[i].astype(int), 2] + connection_limbs[k][i][2]
+                        person_to_joint_assoc[j][-1][1] = max(connection_limbs[k][i][-1], person_to_joint_assoc[j][-1][1])
                         # the second last number in each row is the score of the overall configuration
 
-                    elif subset[candB_id][indexB][0].astype(int) != partBs[person_idx].astype(int):
-                        if subset[candB_id][indexB][1] >= connectA[2]:
-                            # 如果考察的这个limb连接没有已经存在的可信，则跳过
+                    elif person_to_joint_assoc[j][indexB][0].astype(int) != partBs[i].astype(int):
+                        if person_to_joint_assoc[j][indexB][1] >= connection_limbs[k][i][2]:
                             pass
 
                         else:
-                            # 否则用当前的limb端点覆盖已经存在的点，并且在这之前，减去已存在关节点的置信度和连接它的limb置信度
-                            if params['len_rate'] * subset[candB_id][-1][1] <= connectA[-1]:
+                            if params['len_rate'] * person_to_joint_assoc[j][-1][1] <= connection_limbs[k][i][-1]:
                                 continue
-                            # 减去之前的节点置信度和limb置信度
-                            subset[candB_id][-2][0] -= candidate[subset[candB_id][indexB][0].astype(int), 2] + \
-                                                       subset[candB_id][indexB][1]
+                            person_to_joint_assoc[j][-2][0] -= joint_candidates[person_to_joint_assoc[j][indexB][0].astype(int), 2] + person_to_joint_assoc[j][indexB][1]
 
-                            # 添加当前节点
-                            subset[candB_id][indexB][0] = partBs[person_idx]
-                            subset[candB_id][indexB][1] = connectA[2]  # 保存这个点被留下来的置信度
-                            subset[candB_id][-2][0] += candidate[partBs[person_idx].astype(int), 2] + connectA[2]
+                            person_to_joint_assoc[j][indexB][0] = partBs[i]
+                            person_to_joint_assoc[j][indexB][1] = connection_limbs[k][i][2]  # 保存這個點被留下來的置信度
+                            person_to_joint_assoc[j][-2][0] += joint_candidates[partBs[i].astype(int), 2] + connection_limbs[k][i][2]
 
-                            subset[candB_id][-1][1] = max(connectA[-1], subset[candB_id][-1][1])
+                            person_to_joint_assoc[j][-1][1] = max(connection_limbs[k][i][-1], person_to_joint_assoc[j][-1][1])
 
-                    # overlap the reassigned keypoint with higher score
-                    #  如果是添加冗余连接的重复的点，用新的更加高的冗余连接概率取代原来连接的相同的关节点的概率
-                    # -- 对上面问题的回答： 使用前500进行测试，发现加上这个能提高0.1%，没有什么区别
-                    elif subset[candB_id][indexB][0].astype(int) == partBs[person_idx].astype(int) and \
-                         subset[candB_id][indexB][1] <= connectA[2]:
-                        # 否则用当前的limb端点覆盖已经存在的点，并且在这之前，减去已存在关节点的置信度和连接它的limb置信度
-                        if params['len_rate'] * subset[candB_id][-1][1] <= connectA[-1]:  # > DELETED
+                    elif person_to_joint_assoc[j][indexB][0].astype(int) == partBs[i].astype(int) and person_to_joint_assoc[j][indexB][1] <= \
+                            connection_limbs[k][i][2]:
+                        if params['len_rate'] * person_to_joint_assoc[j][-1][1] <= connection_limbs[k][i][-1]:
                             continue
-                        # 减去之前的节点置信度和limb置信度
-                        subset[candB_id][-2][0] -= candidate[subset[candB_id][indexB][0].astype(int), 2] + subset[candB_id][indexB][1]
+                        person_to_joint_assoc[j][-2][0] -= joint_candidates[person_to_joint_assoc[j][indexB][0].astype(int), 2] + person_to_joint_assoc[j][indexB][1]
+                        person_to_joint_assoc[j][indexB][0] = partBs[i]
+                        person_to_joint_assoc[j][indexB][1] = connection_limbs[k][i][2]  # 保存這個點被留下來的置信度
+                        person_to_joint_assoc[j][-2][0] += joint_candidates[partBs[i].astype(int), 2] + connection_limbs[k][i][2]
 
-                        # 添加当前节点
-                        subset[candB_id][indexB][0] = partBs[person_idx]
-                        subset[candB_id][indexB][1] = connectA[2]  # 保存这个点被留下来的置信度
-                        subset[candB_id][-2][0] += candidate[partBs[person_idx].astype(int), 2] + connectA[2]
-
-                        subset[candB_id][-1][1] = max(connectA[-1], subset[candB_id][-1][1])
+                        person_to_joint_assoc[j][-1][1] = max(connection_limbs[k][i][-1], person_to_joint_assoc[j][-1][1])
 
                 elif found == 2:  # if found 2 and disjoint, merge them (disjoint：不相交)
-                    # -----------------------------------------------------
-                    # 如果肢体组成的关节点A,B分别连到了两个人体，则表明这两个人体应该组成一个人体，
-                    # 则合并两个人体（当肢体是按顺序拼接情况下不存在这样的状况）
-                    # --------------------------------------------------
+                    j1, j2 = subset_idx
 
-                    # 说明组装的过程中，有断掉的情况（有limb或者说connection缺失），在之前重复开辟了一个sub person,其实他们是同一个人上的
-                    # If humans H1 and H2 share a part index with the same coordinates, they are sharing the same part!
-                    #  H1 and H2 are, therefore, the same humans. So we merge both sets into H1 and remove H2.
-                    # https://arvrjourney.com/human-pose-estimation-using-openpose-with-tensorflow-part-2-e78ab9104fc8
-                    # 该代码与链接中的做法有差异，个人认为链接中的更加合理而且更容易理解
-                    j1, j2 = found_subset_idx
-
-                    membership1 = ((subset[j1][..., 0] >= 0).astype(int))[:-2]  # 用[:,0]也可
-                    membership2 = ((subset[j2][..., 0] >= 0).astype(int))[:-2]
+                    membership1 = ((person_to_joint_assoc[j1][..., 0] >= 0).astype(int))[:-2]  # 用[:,0]也可
+                    membership2 = ((person_to_joint_assoc[j2][..., 0] >= 0).astype(int))[:-2]
                     membership = membership1 + membership2
-                    # [:-2]不包括最后个数项与scores项
-                    # 这些点应该属于同一个人,将这个人所有类型关键点（端点part)个数逐个相加
                     if len(np.nonzero(membership == 2)[0]) == 0:  # if found 2 and disjoint, merge them
 
-                        min_limb1 = np.min(subset[j1, :-2, 1][membership1 == 1])
-                        min_limb2 = np.min(subset[j2, :-2, 1][membership2 == 1])
-                        min_tolerance = min(min_limb1, min_limb2)  # 计算允许进行拼接的最低置信度
+                        min_limb1 = np.min(person_to_joint_assoc[j1, :-2, 1][membership1 == 1])
+                        min_limb2 = np.min(person_to_joint_assoc[j2, :-2, 1][membership2 == 1])
+                        min_tolerance = min(min_limb1, min_limb2)  # 計算允許進行拼接的置信度
 
-                        if connectA[2] < params['connection_tole'] * min_tolerance or params['len_rate'] * \
-                                subset[j1][-1][1] <= connectA[-1]:
-                            # 如果merge这两个身体部分的置信度不够大，或者当前这个limb明显大于已存在的limb的长度，则不进行连接
-                            # todo: finetune the tolerance of connection
+                        if connection_limbs[k][i][2] < params['connection_tole'] * min_tolerance or params['len_rate'] * \
+                                person_to_joint_assoc[j1][-1][1] <= connection_limbs[k][i][-1]:
                             continue  #
 
-                        subset[j1][:-2][...] += (subset[j2][:-2][...] + 1)
-                        # 对于没有节点标记的地方，因为两行subset相应位置处都是-1,所以合并之后没有节点的部分依旧是-１
-                        # 把不相交的两个subset[j1],[j2]中的id号进行相加，从而完成合并，这里+1是因为默认没有找到关键点初始值是-1
-
-                        subset[j1][-2:][:, 0] += subset[j2][-2:][:, 0]  # 两行subset的点的个数和总置信度相加
-
-                        subset[j1][-2][0] += connectA[2]
-                        subset[j1][-1][1] = max(connectA[-1], subset[j1][-1][1])
-                        # 注意：　因为是disjoint的两行subset点的merge，因此先前存在的节点的置信度之前已经被加过了 !! 这里只需要再加当前考察的limb的置信度
-                        subset = np.delete(subset, j2, 0)
+                        person_to_joint_assoc[j1][:-2][...] += (person_to_joint_assoc[j2][:-2][...] + 1)
+                        person_to_joint_assoc[j1][-2:][:, 0] += person_to_joint_assoc[j2][-2:][:, 0]  # 兩行subset的點的個數和總置信度相加
+                        person_to_joint_assoc[j1][-2][0] += connection_limbs[k][i][2]
+                        person_to_joint_assoc[j1][-1][1] = max(connection_limbs[k][i][-1], person_to_joint_assoc[j1][-1][1])
+                        person_to_joint_assoc = np.delete(person_to_joint_assoc, j2, 0)
 
                     else:
-                        # 出现了两个人同时竞争一个limb的情况，并且这两个人不是同一个人，通过比较两个人包含此limb的置信度来决定，
-                        # 当前limb的节点应该分配给谁，同时把之前的那个与当前节点相连的节点(即partsA[i])从另一个人(subset)的节点集合中删除
-                        if connectA[0] in subset[j1, :-2, 0]:
-                            c1 = np.where(subset[j1, :-2, 0] == connectA[0])
-                            c2 = np.where(subset[j2, :-2, 0] == connectA[1])
+                        if connection_limbs[k][i][0] in person_to_joint_assoc[j1, :-2, 0]:
+                            c1 = np.where(person_to_joint_assoc[j1, :-2, 0] == connection_limbs[k][i][0])
+                            c2 = np.where(person_to_joint_assoc[j2, :-2, 0] == connection_limbs[k][i][1])
                         else:
-                            c1 = np.where(subset[j1, :-2, 0] == connectA[1])
-                            c2 = np.where(subset[j2, :-2, 0] == connectA[0])
+                            c1 = np.where(person_to_joint_assoc[j1, :-2, 0] == connection_limbs[k][i][1])
+                            c2 = np.where(person_to_joint_assoc[j2, :-2, 0] == connection_limbs[k][i][0])
 
-                        # c1, c2分别是当前limb连接到j1人的第c1个关节点，j2人的第c2个关节点
                         c1 = int(c1[0])
                         c2 = int(c2[0])
                         assert c1 != c2, "an candidate keypoint is used twice, shared by two people"
 
-                        # 如果当前考察的limb置信度比已经存在的两个人连接的置信度小，则跳过，否则删除已存在的不可信的连接节点。
-                        if connectA[2] < subset[j1][c1][1] and connectA[2] < subset[j2][c2][1]:
+                        if connection_limbs[k][i][2] < person_to_joint_assoc[j1][c1][1] and connection_limbs[k][i][2] < person_to_joint_assoc[j2][c2][1]:
                             continue  # the trick here is useful
 
                         small_j = j1
                         big_j = j2
                         remove_c = c1
 
-                        if subset[j1][c1][1] > subset[j2][c2][1]:
+                        if person_to_joint_assoc[j1][c1][1] > person_to_joint_assoc[j2][c2][1]:
                             small_j = j2
                             big_j = j1
                             remove_c = c2
-
-                        # 删除和当前limb有连接,并且置信度低的那个人的节点 > TOCHECK:  获取不删除？为了检测更多？
                         if params['remove_recon'] > 0:
-                            subset[small_j][-2][0] -= candidate[subset[small_j][remove_c][0].astype(int), 2] + \
-                                                      subset[small_j][remove_c][1]
-                            subset[small_j][remove_c][0] = -1
-                            subset[small_j][remove_c][1] = -1
-                            subset[small_j][-1][0] -= 1
+                            person_to_joint_assoc[small_j][-2][0] -= joint_candidates[person_to_joint_assoc[small_j][remove_c][0].astype(int), 2] + \
+                                                      person_to_joint_assoc[small_j][remove_c][1]
+                            person_to_joint_assoc[small_j][remove_c][0] = -1
+                            person_to_joint_assoc[small_j][remove_c][1] = -1
+                            person_to_joint_assoc[small_j][-1][0] -= 1
 
-                # if find no partA in the subset, create a new subset
-                # 如果肢体组成的关节点A,B没有被连接到某个人体则组成新的人体
-                # ------------------------------------------------------------------
-                #    1.Sort each possible connection by its score.
-                #    2.The connection with the highest score is indeed a final connection.
-                #    3.Move to next possible connection. If no parts of this connection have
-                #    been assigned to a final connection before, this is a final connection.
-                #    第三点是说，如果下一个可能的连接没有与之前的连接有共享端点的话，会被视为最终的连接，加入row
-                #    4.Repeat the step 3 until we are done.
-                # 说明见：　https://arvrjourney.com/human-pose-estimation-using-openpose-with-tensorflow-part-2-e78ab9104fc8
-
-                elif not found and pair_id < len(limb_pairs):
-                    # TOCHECK: 检查是否正确
-                    #  原始的时候是 k<18,因为我加了limb，所以是24,因为真正的limb是0~16，最后两个17,18是额外的不是limb
-                    #  但是后面画limb的时候没有把鼻子和眼睛耳朵的连线画上，要改进
-                    # `connection_all`: (#connect, 6=(A_peak_id, B_peak_id, dist_prior, A_part_id, B_part_id, limb_len))
-                    connectA_peak_ids, connectA_prior, connectA_limblen = connectA[:2], connectA[2], connectA[-1]
-                    row = -1 * np.ones((20, 2))  # > (20, (kp_id, dist_prior)) = `-1`
-                    row[indexA][0] = partAs[person_idx]  # > (#k1_type,)
-                    row[indexA][1] = connectA_prior  # > (#cand_pairs, 6) -> dist_prior
-                    row[indexB][0] = partBs[person_idx]  # > (#k2_type,)
-                    row[indexB][1] = connectA_prior  # > (#cand_pairs, 6) -> dist_prior
-                    # > assign to 19 and 20
-                    row[-1][0] = 2  # TOCHECK: why assign `2` here? is it `bg` class?
-                    row[-1][1] = connectA_limblen  # `limb_len`: 这一位用来记录上轮连接limb时的长度，用来作为下一轮连接的先验知识
-                    # > `candidate`: (#kp * person, (x,y,score,id)) -> peak_ids -> score
-                    row[-2][0] = sum(candidate[connectA_peak_ids.astype(int), 2]) + connectA_prior  # > TOCHECK: `reverse_kp`?
-                    # 两个端点的置信度+limb连接的置信度
+                elif not found and k < len(joint2limb_pairs):
+                    row = -1 * np.ones((20, 2))
+                    row[indexA][0] = partAs[i]
+                    row[indexA][1] = connection_limbs[k][i][2]
+                    row[indexB][0] = partBs[i]
+                    row[indexB][1] = connection_limbs[k][i][2]
+                    row[-1][0] = 2
+                    row[-1][1] = connection_limbs[k][i][-1]  # 這一位用來記錄上輪連接limb時的長度，用來作為下一輪連接的先驗知識
+                    row[-2][0] = sum(joint_candidates[connection_limbs[k][i, :2].astype(int), 2]) + connection_limbs[k][i][2]
+                    # 兩個端點的置信度+limb連接的置信度
                     # print('create a new subset:  ', row, '\t')
-                    row = row[np.newaxis, :, :]  # 为了进行concatenate，需要插入一个轴, -> (1, 20, 2)
-                    subset = np.concatenate((subset, row), axis=0)  # -> (1, 20, 2) TOCHECK: line 384?
+                    row = row[np.newaxis, :, :]  # 為了進行concatenate，需要插入一個軸
+                    person_to_joint_assoc = np.concatenate((person_to_joint_assoc, row), axis=0)
 
     # delete some rows of subset which has few parts occur
     deleteIdx = []
-    for person_idx in range(len(subset)):  # > #person
-        # CHANGED: `< 4` -> `< 2`
-        if subset[person_idx][-1][0] < 4 or \
-           subset[person_idx][-2][0] / subset[person_idx][-1][0] < 0.45:
-            deleteIdx.append(person_idx)
-    subset = np.delete(subset, deleteIdx, axis=0)
+    for i in range(len(person_to_joint_assoc)):
+        if person_to_joint_assoc[i][-1][0] < 4 or person_to_joint_assoc[i][-2][0] / person_to_joint_assoc[i][-1][0] < 0.45:
+            deleteIdx.append(i)
+    person_to_joint_assoc = np.delete(person_to_joint_assoc, deleteIdx, axis=0)
 
-    return subset, candidate
+    return person_to_joint_assoc, joint_candidates
 
 
 def show_color_vector(oriImg, paf_avg, heatmap_avg):
-    hsv = np.zeros_like(oriImg)  # > (imgH, imgW, 3)
-    hsv[..., 1] = 255  # > (imgH, imgW, (0,255,0))
-    # > convert from `cartesian` to `polar`, `paf_avg`: (imgH, imgW, 30) -> c=16 -> (imgH, imgW)
-    mag, ang = cv2.cartToPolar(paf_avg[:, :, 16], 1.5 * paf_avg[:, :, 16])  # 设置不同的系数，可以使得显示颜色不同 -> (imgH, imgW)
+    hsv = np.zeros_like(oriImg)
+    hsv[..., 1] = 255
 
-    # TOCHECK: 将弧度转换为角度，同时OpenCV中的H范围是180(0 - 179)，所以再除以2
-    # 完成后将结果赋给HSV的H通道，不同的角度(方向)以不同颜色表示
-    # 对于不同方向，产生不同色调
-    # hsv[...,0]等价于hsv[:,:,0]
+    mag, ang = cv2.cartToPolar(paf_avg[:, :, 16], 1.5 * paf_avg[:, :, 16])  # 設置不同的係數，可以使得顯示顏色不同
+
+    # 將弧度轉換為角度，同時OpenCV中的H範圍是180(0 - 179)，所以再除以2
+    # 完成後將結果賦給HSV的H通道，不同的角度(方向)以不同顏色表示
+    # 對於不同方向，產生不同色調
+    # hsv[...,0]等價於hsv[:,:,0]
     hsv[..., 0] = ang * 180 / np.pi / 2
 
-    # 将矢量大小标准化到0-255范围。因为OpenCV中V分量对应的取值范围是256
-    # 对于同一H、S而言，向量的大小越大，对应颜色越亮
+    # 將矢量大小標準化到0-255範圍。因為OpenCV中V份量對應的取值範圍是256
+    # 對於同一H、S而言，向量的大小越大，對應顏色越亮
     hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
-    # 最后，将生成好的HSV图像转换为BGR颜色空间
+    # 最後，將生成好的HSV圖像轉換為BGR顏色空間
     limb_flow = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
     plt.imshow(oriImg[:, :, [2, 1, 0]])
@@ -634,17 +434,15 @@ def show_color_vector(oriImg, paf_avg, heatmap_avg):
     plt.imshow(oriImg[:, :, [2, 1, 0]])
     plt.imshow(paf_avg[:, :, 11], alpha=.6)
     plt.show()
-    # `heatmap_avg`: (imgH, imgW, 20) -> c=19 -> (imgH, imgW)
+
     plt.imshow(heatmap_avg[:, :, -1])
     plt.imshow(oriImg[:, :, [2, 1, 0]], alpha=0.25)  # show a keypoint
     plt.show()
 
-    # `heatmap_avg`: (imgH, imgW, 20) -> c=18 -> (imgH, imgW)
     plt.imshow(heatmap_avg[:, :, -2])
     plt.imshow(oriImg[:, :, [2, 1, 0]], alpha=0.5)  # show the person mask
     plt.show()
 
-    # `heatmap_avg`: (imgH, imgW, 20) -> c=4 -> (imgH, imgW)
     plt.imshow(oriImg[:, :, [2, 1, 0]])  # show a keypoint
     plt.imshow(heatmap_avg[:, :, 4], alpha=.5)
     plt.show()
@@ -656,14 +454,16 @@ if __name__ == '__main__':
     output = args.output
 
     posenet = NetworkEval(opt, config, bn=True)
-    print('> Model = ', posenet)
+
     print('Resuming from checkpoint ...... ')
     checkpoint = torch.load(opt.ckpt_path, map_location=torch.device('cpu'))  # map to cpu to save the gpu memory
-    posenet.load_state_dict(checkpoint['weights'])  # 加入他人训练的模型，可能需要忽略部分层，则strict=False
+    posenet.load_state_dict(checkpoint['weights'])  # 加入他人訓練的模型，可能需要忽略部分層，則strict=False
     print('Network weights have been resumed from checkpoint...')
 
     if torch.cuda.is_available():
         posenet.cuda()
+
+    from apex import amp
 
     posenet = amp.initialize(posenet,
                              opt_level=args.opt_level,
@@ -678,35 +478,11 @@ if __name__ == '__main__':
     tic = time.time()
     # generate image with body parts
     with torch.no_grad():
-        canvas = process(input_image, params, model_params,
-                         config.heat_layers + 2,  # `heat_layers`: 18 + 2(bg, reverse)
-                         config.paf_layers)  # > `paf_layers`: 30
+        canvas = process(input_image, params, model_params, config.heat_layers + 2,
+                         config.paf_layers)  # todo background + 2
 
     toc = time.time()
     print('processing time is %.5f' % (toc - tic))
 
-    # TODO: the prediction is slow, how to fix it? Not solved yet. see:
-    #  https://github.com/anatolix/keras_Realtime_Multi-Person_Pose_Estimation/issues/5
-
-    # cv2.namedWindow("result", cv2.WINDOW_AUTOSIZE)  # cv2.WINDOW_NORMAL 自动适合的窗口大小
-    # cv2.imshow('result', canvas)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-    # cv2.imwrite(output, canvas)
-
-    # pdf = PdfPages(output + '.pdf')
-    # plt.figure()
-    # plt.plot(canvas[:, :, [2, 1, 0]])
-    plt.imshow(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-    plt.tight_layout()
+    plt.imshow(canvas[:, :, [2,1,0]])
     plt.show()
-    # pdf.savefig()
-    # plt.close()
-    # pdf.close()
-
-    # dummy_input = torch.randn(1, 384, 384, 3)
-    # from thop import profile
-    # from thop import clever_format
-    # flops, params = profile(posenet, inputs=(dummy_input,))
-    # flops, params = clever_format([flops, params], "%.3f")
-    # print(flops, params)
