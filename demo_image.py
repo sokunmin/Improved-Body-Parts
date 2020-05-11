@@ -53,27 +53,26 @@ draw_list = config.draw_list
 
 # ###############################################################################################################
 def process(input_image_path, params, model_params, heat_layers, paf_layers):
-    oriImg = cv2.imread(input_image)  # B,G,R order.    訓練數據的讀入也是用opencv，因此也是B, G, R順序
-    img_h, img_w, _ = oriImg.shape
-    heatmaps, pafs = predict(oriImg, params, model_params, heat_layers, paf_layers, input_image_path)
-    show_color_vector(oriImg, pafs, heatmaps)
+    ori_img = cv2.imread(input_image)
+    img_h, img_w, _ = ori_img.shape
+    heatmaps, pafs = predict(ori_img, params, model_params, heat_layers, paf_layers, input_image_path)
+    show_color_vector(ori_img, pafs, heatmaps)
     joint_list = find_peaks(heatmaps)
     connection_limbs, special_k = find_connections(joint_list, pafs, img_w)
     person_to_joint_assoc, joint_candidates = find_humans(connection_limbs, joint_list, special_k)
 
     canvas = cv2.imread(input_image)  # B,G,R order
-    # canvas = oriImg
-    keypoints = []
 
-    for s in person_to_joint_assoc[..., 0]:
-        keypoint_indexes = s[:18]  # 定義的keypoint一共有18個
+    keypoints = []
+    for person in person_to_joint_assoc[..., 0]:
+        keypoint_indexes = person[:18]
         person_keypoint_coordinates = []
         for index in keypoint_indexes:
             if index == -1:
                 # "No candidate for keypoint" # 標誌為-1的part是沒有檢測到的
                 X, Y = 0, 0
             else:
-                X, Y = joint_candidates[index.astype(int)][:2]
+                X, Y = joint_candidates[index.astype(int), :2]
             person_keypoint_coordinates.append((X, Y))
         person_keypoint_coordinates_coco = [None] * 17
 
@@ -82,7 +81,7 @@ def process(input_image_path, params, model_params, heat_layers, paf_layers):
                 continue
             person_keypoint_coordinates_coco[gt_index] = person_keypoint_coordinates[dt_index]
 
-        keypoints.append((person_keypoint_coordinates_coco, 1 - 1.0 / s[-2]))  # s[19] is the score
+        keypoints.append((person_keypoint_coordinates_coco, 1 - 1.0 / person[-2]))  # s[19] is the score
 
     for i in range(len(keypoints)):
         print('the {}th keypoint detection result is : '.format(i), keypoints[i])
@@ -115,11 +114,12 @@ def process(input_image_path, params, model_params, heat_layers, paf_layers):
     return canvas
 
 
-def predict(oriImg, params, model_params, heat_layers, paf_layers, input_image_path):
-    multiplier = [x * model_params['boxsize'] / oriImg.shape[0] for x in params['scale_search']]  # 按照圖片高度進行縮放
+def predict(image, params, model_params, heat_layers, paf_layers, input_image_path):
+    img_h, img_w, _ = image.shape
+    heatmap_avg = np.zeros((image.shape[0], image.shape[1], heat_layers))  # fixme if you change the number of keypoints
+    paf_avg = np.zeros((image.shape[0], image.shape[1], paf_layers))
 
-    heatmap_avg = np.zeros((oriImg.shape[0], oriImg.shape[1], heat_layers))  # fixme if you change the number of keypoints
-    paf_avg = np.zeros((oriImg.shape[0], oriImg.shape[1], paf_layers))
+    multiplier = [x * model_params['boxsize'] / img_h for x in params['scale_search']]  # 按照圖片高度進行縮放
 
     max_downsample = model_params['max_downsample']
     pad_value = model_params['padValue']
@@ -127,15 +127,17 @@ def predict(oriImg, params, model_params, heat_layers, paf_layers, input_image_p
 
     for m in range(len(multiplier)):
         scale = multiplier[m]
+        img_max_h, img_max_w = (2300, 3200)
+        if scale * img_h > img_max_h or scale * img_w > img_max_w:
+            scale = min(img_max_h / img_h, img_max_w / img_w)
+            print("Input image: '{}' is too big, shrink it!".format(input_image_path))
 
-        if scale * oriImg.shape[0] > 2300 or scale * oriImg.shape[1] > 3200:
-            scale = min(2300 / oriImg.shape[0], 3200 / oriImg.shape[1])
-            print("Input image is too big, shrink it !")
-
-        imageToTest = cv2.resize(oriImg, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)  # cv2.INTER_CUBIC
+        imageToTest = cv2.resize(image, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)  # cv2.INTER_CUBIC
         imageToTest_padded, pad = util.padRightDownCorner(imageToTest,
                                                           max_downsample,
                                                           pad_value)
+
+        scale_padH, scale_padW, _ = imageToTest_padded.shape
 
         input_img = np.float32(imageToTest_padded / 255)
         swap_image = input_img[:, ::-1, :].copy()
@@ -159,20 +161,22 @@ def predict(oriImg, params, model_params, heat_layers, paf_layers, input_image_p
         output_heatmap_avg = (output_heatmap + output_heatmap_flip[:, ::-1, :][:, :, flip_heat_ord]) / 2
 
         # extract outputs, resize, and remove padding
-        heatmap = cv2.resize(output_heatmap_avg, (0, 0),
+        heatmap = cv2.resize(output_heatmap_avg,
+                             (0, 0),
                              fx=stride,
                              fy=stride,
                              interpolation=cv2.INTER_CUBIC)
-        heatmap = heatmap[:imageToTest_padded.shape[0] - pad[2], :imageToTest_padded.shape[1] - pad[3], :]
-        heatmap = cv2.resize(heatmap, (oriImg.shape[1], oriImg.shape[0]), interpolation=cv2.INTER_CUBIC)
-
-        # output_blob0 is PAFs
-        paf = cv2.resize(output_paf_avg, (0, 0),
+        paf = cv2.resize(output_paf_avg,
+                         (0, 0),
                          fx=stride,
                          fy=stride,
                          interpolation=cv2.INTER_CUBIC)
-        paf = paf[:imageToTest_padded.shape[0] - pad[2], :imageToTest_padded.shape[1] - pad[3], :]
-        paf = cv2.resize(paf, (oriImg.shape[1], oriImg.shape[0]), interpolation=cv2.INTER_CUBIC)
+
+        heatmap = heatmap[:scale_padH - pad[2], :scale_padW - pad[3], :]
+        paf = paf[:scale_padH - pad[2], :scale_padW - pad[3], :]
+
+        heatmap = cv2.resize(heatmap, (img_w, img_h), interpolation=cv2.INTER_CUBIC)
+        paf = cv2.resize(paf, (img_w, img_h), interpolation=cv2.INTER_CUBIC)
 
         heatmap_avg = heatmap_avg + heatmap / len(multiplier)
         paf_avg = paf_avg + paf / len(multiplier)
@@ -184,7 +188,7 @@ def predict(oriImg, params, model_params, heat_layers, paf_layers, input_image_p
 
 
 def find_peaks(heatmap_avg):
-    joint_list = []
+    all_peaks = []
     peak_counter = 0
 
     heatmap_avg = heatmap_avg.astype(np.float32)
@@ -205,16 +209,16 @@ def find_peaks(heatmap_avg):
         id = range(peak_counter, peak_counter + len(refined_peaks_with_score))
         peaks_with_score_and_id = [refined_peaks_with_score[i] + (id[i],) for i in range(len(id))]
 
-        joint_list.append(peaks_with_score_and_id)
+        all_peaks.append(peaks_with_score_and_id)
         peak_counter += len(peaks)  # refined_peaks
 
-    return joint_list
+    return all_peaks
 
 
 def find_connections(joint_list, paf_avg, img_width):
 
     connection_limbs = []
-    special_k = []
+    special_limb = []
 
     for pair_id in range(len(joint2limb_pairs)):
         score_mid = paf_avg[:, :, pair_id]
@@ -222,10 +226,10 @@ def find_connections(joint_list, paf_avg, img_width):
         joints_dst = joint_list[joint2limb_pairs[pair_id][1]]
 
         if len(joints_src) == 0 and len(joints_dst) == 0:
-            special_k.append(pair_id)
+            special_limb.append(pair_id)
             connection_limbs.append([])
         else:
-            connection_candidate = []
+            connection_candidates = []
             for i, joint_src in enumerate(joints_src):
                 for j, joint_dst in enumerate(joints_dst):
                     joint_src = np.array(joint_src)
@@ -237,44 +241,46 @@ def find_connections(joint_list, paf_avg, img_width):
                         # https://github.com/ZheC/Realtime_Multi-Person_Pose_Estimation/issues/54
                         continue
 
-                    limb_intermed_x = np.round(np.linspace(start=joint_src[0], stop=joint_dst[0], num=mid_num)).astype(
-                        np.intp)
-                    limb_intermed_y = np.round(np.linspace(start=joint_src[1], stop=joint_dst[1], num=mid_num)).astype(
-                        np.intp)
+                    limb_intermed_x = np.round(np.linspace(start=joint_src[0], stop=joint_dst[0], num=mid_num)).astype(np.intp)
+                    limb_intermed_y = np.round(np.linspace(start=joint_src[1], stop=joint_dst[1], num=mid_num)).astype(np.intp)
                     limb_response = score_mid[limb_intermed_y, limb_intermed_x]  # > (20,)
 
                     score_midpts = limb_response
 
-                    connect_score = sum(score_midpts) / len(score_midpts) + min(0.5 * img_width / limb_len - 1, 0)
-                    criterion1 = len(np.nonzero(score_midpts > params['thre2'])[0]) > params['connect_ration'] * len(
-                        score_midpts)  # fixme: tune 手動調整, 本來是 > 0.8*len
+                    connect_score = score_midpts.mean() + min(0.5 * img_width / limb_len - 1, 0)
+                    criterion1 = \
+                        np.count_nonzero(score_midpts > params['thre2']) > mid_num * params['connect_ration']
                     criterion2 = connect_score > 0
 
                     if criterion1 and criterion2:
-                        connection_candidate.append([
-                            i, j, connect_score, limb_len,
+                        connection_candidates.append([
+                            i, j,
+                            connect_score,
+                            limb_len,
                             0.5 * connect_score +
                             0.25 * joint_src[2] +
                             0.25 * joint_dst[2]
                         ])
 
             max_connections = min(len(joints_src), len(joints_dst))
-            connection_candidate = sorted(connection_candidate, key=lambda x: x[4], reverse=True)
-            connection = np.zeros((0, 6))
-            for c in range(len(connection_candidate)):  # 根據confidence的順序選擇connections
-                i, j, s, limb_len = connection_candidate[c][0:4]
-                if i not in connection[:, 3] and j not in connection[:, 4]:
-                    connection = np.vstack([
-                        connection,
+            connection_candidates = sorted(connection_candidates, key=lambda x: x[4], reverse=True)
+            connections = np.zeros((0, 6))
+            for potential_connect in connection_candidates:  # 根據confidence的順序選擇connections
+                i, j, s, limb_len = potential_connect[0:4]
+                if i not in connections[:, 3] and j not in connections[:, 4]:
+                    connections = np.vstack([
+                        connections,
+                        # `src_peak_id`, `dst_peak_id`, `dist_prior`, `joint_src_id`, `joint_dst_id`, `limb_len`
                         [joints_src[i][3], joints_dst[j][3], s, i, j, limb_len]
                     ])  # 後面會被使用
-                    if len(connection) >= max_connections:  # 會出現關節點不夠連的情況
+                    if len(connections) >= max_connections:  # 會出現關節點不夠連的情況
                         break
-            connection_limbs.append(connection)
-    return connection_limbs, special_k
+            connection_limbs.append(connections)
+
+    return connection_limbs, special_limb
 
 
-def find_humans(connection_limbs, joint_list, special_k):
+def find_humans(connection_limbs, joint_list, special_limb):
 
     person_to_joint_assoc = -1 * np.ones((0, 20, 2))
     joint_candidates = np.array([item for sublist in joint_list for item in sublist])
@@ -284,11 +290,10 @@ def find_humans(connection_limbs, joint_list, special_k):
     remove_recon = params['remove_recon']
 
     for limb_type in range(len(joint2limb_pairs)):
-        if limb_type not in special_k:  # 即　有與之相連的，這個paf(limb)是存在的
+        if limb_type not in special_limb:
             joint_src_type, joint_dst_type = joint2limb_pairs[limb_type]
 
-            for limb_id, limb_info in enumerate(connection_limbs[limb_type]):
-
+            for person_id, limb_info in enumerate(connection_limbs[limb_type]):
                 limb_src_peak_id = limb_info[0]
                 limb_dst_peak_id = limb_info[1]
                 limb_connect_score = limb_info[2]
@@ -301,18 +306,18 @@ def find_humans(connection_limbs, joint_list, special_k):
                         person_assoc_idx.append(person_id)
 
                 if len(person_assoc_idx) == 1:
-
                     person_limbs = person_to_joint_assoc[person_assoc_idx[0]]
                     person_dst_peak_id = person_limbs[joint_dst_type, 0]
                     person_dst_connect_score = person_limbs[joint_dst_type, 1]
                     person_limb_len = person_limbs[-1, 1]
 
                     # dst joint is connected yet.
-                    if person_dst_peak_id.astype(int) == -1 and len_rate * person_limb_len > limb_len:
+                    if person_dst_peak_id.astype(int) == -1 and \
+                       person_limb_len * len_rate > limb_len:
                         person_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
-                        person_limbs[-1][0] += 1  # last number in each row is the total parts number of that person
-                        person_limbs[-2][0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
-                        person_limbs[-1][1] = max(limb_len, person_limb_len)
+                        person_limbs[-1, 0] += 1  # last number in each row is the total parts number of that person
+                        person_limbs[-1, 1] = max(limb_len, person_limb_len)
+                        person_limbs[-2, 0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
                         # the second last number in each row is the score of the overall configuration
 
                     # dst joint is connected, but peak_id is not same.
@@ -325,11 +330,12 @@ def find_humans(connection_limbs, joint_list, special_k):
                             if len_rate * person_limb_len <= limb_len:
                                 continue
 
-                            person_limbs[-2][0] -= joint_candidates[person_dst_peak_id.astype(int), 2] + person_dst_connect_score
+                            person_limbs[-2, 0] -= joint_candidates[person_dst_peak_id.astype(int), 2] + \
+                                                   person_dst_connect_score
                             person_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
-                            person_limbs[-2][0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
-
-                            person_limbs[-1][1] = max(limb_len, person_limb_len)
+                            person_limbs[-2, 0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + \
+                                                   limb_connect_score
+                            person_limbs[-1, 1] = max(limb_len, person_limb_len)
 
                     # dst joint is connected, and peak_id is same, but prev score is lower than current one.
                     elif person_dst_peak_id.astype(int) == limb_dst_peak_id.astype(int) and \
@@ -337,18 +343,18 @@ def find_humans(connection_limbs, joint_list, special_k):
                         # TOCHECK: why compare length?
                         if len_rate * person_limb_len <= limb_len:
                             continue
-                        person_limbs[-2][0] -= joint_candidates[person_dst_peak_id.astype(int), 2] + person_dst_connect_score
+                        person_limbs[-2, 0] -= joint_candidates[person_dst_peak_id.astype(int), 2] + person_dst_connect_score
                         person_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
-                        person_limbs[-2][0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
-
-                        person_limbs[-1][1] = max(limb_len, person_limb_len)
+                        person_limbs[-2, 0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
+                        person_limbs[-1, 1] = max(limb_len, person_limb_len)
 
                 elif len(person_assoc_idx) == 2:  # if found 2 and disjoint, merge them (disjoint：不相交)
                     person1_id, person2_id = person_assoc_idx[0], person_assoc_idx[1]
                     person1_limbs = person_to_joint_assoc[person1_id]  # > (20,2)
                     person2_limbs = person_to_joint_assoc[person2_id]  # > (20,2)
+                    person1_limb_len = person1_limbs[-1, 1]
 
-                    membership1 = ((person1_limbs[..., 0] >= 0).astype(int))[:-2]  # 用[:,0]也可
+                    membership1 = ((person1_limbs[..., 0] >= 0).astype(int))[:-2]
                     membership2 = ((person2_limbs[..., 0] >= 0).astype(int))[:-2]
                     membership = membership1 + membership2
                     if len(np.nonzero(membership == 2)[0]) == 0:  # if found 2 and disjoint, merge them
@@ -358,13 +364,13 @@ def find_humans(connection_limbs, joint_list, special_k):
                         min_tolerance = min(min_limb1, min_limb2)
 
                         if limb_connect_score < connection_tole * min_tolerance or \
-                                len_rate * person1_limbs[-1][1] <= limb_len:
-                            continue  #
+                           limb_len >= len_rate * person1_limb_len:
+                            continue
 
                         person1_limbs[:-2][...] += (person2_limbs[:-2][...] + 1)
                         person1_limbs[-2:][:, 0] += person2_limbs[-2:][:, 0]
-                        person1_limbs[-2][0] += limb_connect_score
-                        person1_limbs[-1][1] = max(limb_len, person1_limbs[-1, 1])
+                        person1_limbs[-2, 0] += limb_connect_score
+                        person1_limbs[-1, 1] = max(limb_len, person1_limb_len)
                         person_to_joint_assoc = np.delete(person_to_joint_assoc, person2_id, 0)
 
                     else:
@@ -409,12 +415,12 @@ def find_humans(connection_limbs, joint_list, special_k):
                     person_to_joint_assoc = np.concatenate((person_to_joint_assoc, row), axis=0)
 
     # delete some rows of subset which has few parts occur
-    deleteIdx = []
-    for limb_id in range(len(person_to_joint_assoc)):
+    people_to_delete = []
+    for person_id, person_info in enumerate(person_to_joint_assoc):
         # CHANGED: 4 -> 2
-        if person_to_joint_assoc[limb_id][-1][0] < 4 or person_to_joint_assoc[limb_id][-2][0] / person_to_joint_assoc[limb_id][-1][0] < 0.45:
-            deleteIdx.append(limb_id)
-    person_to_joint_assoc = np.delete(person_to_joint_assoc, deleteIdx, axis=0)
+        if person_info[-1, 0] < 4 or person_info[-2, 0] / person_info[-1, 0] < 0.45:
+            people_to_delete.append(person_id)
+    person_to_joint_assoc = np.delete(person_to_joint_assoc, people_to_delete, axis=0)
 
     return person_to_joint_assoc, joint_candidates
 
