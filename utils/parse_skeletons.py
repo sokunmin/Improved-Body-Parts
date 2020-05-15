@@ -559,14 +559,13 @@ def find_humans(connected_limbs, special_limb, joint_list, test_cfg, joint2limb_
                                     delete_conn_idx = conn1_idx
                                 # > delete the joint that has low confidence connected with current limb
                                 # > TOCHECK: detect more joints if not delete?
-                                if delete_shared_joints > 0:
-                                    # `person_to_joint_assoc`: (#person, 20, 2)
-                                    person_to_joint_assoc[low_conf_idx, -2, 0] -= \
-                                        joint_candidates[person_to_joint_assoc[low_conf_idx, delete_conn_idx, 0].astype(int), 2] + \
-                                        person_to_joint_assoc[low_conf_idx, delete_conn_idx, 1]
-                                    person_to_joint_assoc[low_conf_idx, delete_conn_idx, 0] = -1
-                                    person_to_joint_assoc[low_conf_idx, delete_conn_idx, 1] = -1
-                                    person_to_joint_assoc[low_conf_idx, -1, 0] -= 1
+                                # `person_to_joint_assoc`: (#person, 20, 2)
+                                person_to_joint_assoc[low_conf_idx, -2, 0] -= \
+                                    joint_candidates[person_to_joint_assoc[low_conf_idx, delete_conn_idx, 0].astype(int), 2] + \
+                                    person_to_joint_assoc[low_conf_idx, delete_conn_idx, 1]
+                                person_to_joint_assoc[low_conf_idx, delete_conn_idx, 0] = -1
+                                person_to_joint_assoc[low_conf_idx, delete_conn_idx, 1] = -1
+                                person_to_joint_assoc[low_conf_idx, -1, 0] -= 1
 
                 # No person has claimed any of these joints, create a new person
                 # ------------------------------------------------------------------
