@@ -68,7 +68,7 @@ The corresponding code is in pure python without multiprocess for now.
 
 `python evaluate.py` 
 
-Results on MSCOCO 2017 test-dev subset (focal L2 loss with gamma=2):
+Results on MSCOCO 2017 test-dev skeletons (focal L2 loss with gamma=2):
 
 ```
  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= 20 ] = 0.685

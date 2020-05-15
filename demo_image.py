@@ -7,16 +7,20 @@ import math
 import os
 import time
 import warnings
-
+from itertools import product
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
 from config.config import GetConfig, TrainingOpt
+# from demo_image_orig import show_color_vector
 from models.posenet import NetworkEval
-from utils import util
+from apex import amp
+
+from utils.common import BodyPart, Human, CocoPart, CocoColors, CocoPairsRender
 from utils.config_reader import config_reader
+from utils.parse_skeletons import predict, find_peaks, find_connections, find_humans, heatmap_nms, predict_refactor
 
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"  # choose the available GPUs
 warnings.filterwarnings("ignore")
@@ -28,11 +32,12 @@ colors = [[128, 114, 250], [130, 238, 238], [48, 167, 238], [180, 105, 255], [25
           [255, 0, 85], [193, 193, 255], [106, 106, 255], [20, 147, 255]]
 
 torch.cuda.empty_cache()
+
 parser = argparse.ArgumentParser(description='PoseNet Training')
 parser.add_argument('--resume', '-r', action='store_true', default=True, help='resume from checkpoint')
 parser.add_argument('--max_grad_norm', default=5, type=float,
                     help="If the norm of the gradient vector exceeds this, re-normalize it to have the norm equal to max_grad_norm")
-parser.add_argument('--image', type=str, default='try_image/3_p.jpg', help='input image')  # required=True
+parser.add_argument('--image', type=str, default='try_image/20_p.jpg', help='input image')  # required=True
 parser.add_argument('--output', type=str, default='result.jpg', help='output image')
 parser.add_argument('--opt-level', type=str, default='O1')
 parser.add_argument('--keep-batchnorm-fp32', type=str, default=None)
@@ -44,385 +49,164 @@ args = parser.parse_args()
 opt = TrainingOpt()
 config = GetConfig(opt.config_name)
 
-joint2limb_pairs = config.limbs_conn
+joint2limb_pairs = config.limbs_conn  # > 30
 dt_gt_mapping = config.dt_gt_mapping
 flip_heat_ord = config.flip_heat_ord
 flip_paf_ord = config.flip_paf_ord
 draw_list = config.draw_list
 
+NUM_KEYPOINTS = 18
+RUN_REFACTOR = False
+RUN_WITH_CPP = False
+
 
 # ###############################################################################################################
-def process(input_image_path, params, model_params, heat_layers, paf_layers):
-    ori_img = cv2.imread(input_image)
-    img_h, img_w, _ = ori_img.shape
-    heatmaps, pafs = predict(ori_img, params, model_params, heat_layers, paf_layers, input_image_path)
-    show_color_vector(ori_img, pafs, heatmaps)
-    joint_list = find_peaks(heatmaps)
-    connection_limbs, special_k = find_connections(joint_list, pafs, img_w)
-    person_to_joint_assoc, joint_candidates = find_humans(connection_limbs, joint_list, special_k)
+def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layers):
+    ori_img = cv2.imread(input_image_path)
+    image_h, image_w, _ = ori_img.shape
+
+    # > [1]
+    if RUN_REFACTOR:
+        tic = time.time()
+        heatmaps, pafs = predict_refactor(ori_img, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=config)
+        all_peaks = heatmap_nms(heatmaps, model_cfg['stride'])
+        toc = time.time()
+        print('> [original drawing] heatmap elapsed = ', toc - tic)
+        pafs = cv2.resize(pafs, None,
+                          fx=model_cfg['stride'],
+                          fy=model_cfg['stride'],
+                          interpolation=cv2.INTER_CUBIC)
+    else:
+        tic = time.time()
+        # > [2] `heatmaps`, `pafs` are already upsampled in `predict()`
+        heatmaps, pafs = predict(ori_img, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=config)
+        all_peaks = find_peaks(heatmaps, test_cfg)
+        toc = time.time()
+        print('> [original drawing] heatmap elapsed = ', toc - tic)
+
+    # show_color_vector(ori_img, pafs, heatmaps)
+    connected_limbs, special_limb = find_connections(all_peaks, pafs, image_h, test_cfg, joint2limb_pairs)
+    person_to_joint_assoc, joint_candidates = find_humans(connected_limbs, special_limb, all_peaks, test_cfg, joint2limb_pairs)
 
     canvas = cv2.imread(input_image)  # B,G,R order
 
-    keypoints = []
-    for person in person_to_joint_assoc[..., 0]:
-        keypoint_indexes = person[:18]
-        person_keypoint_coordinates = []
-        for index in keypoint_indexes:
-            if index == -1:
-                # "No candidate for keypoint" # 標誌為-1的part是沒有檢測到的
-                X, Y = 0, 0
+    humans = []  # > (#person, [(x,y)*17, score])
+    if RUN_REFACTOR:
+        tic = time.time()
+        joint_list = np.array([
+            tuple(peak) + (joint_type,)
+            for joint_type, joint_peaks in enumerate(all_peaks)
+            for peak in joint_peaks
+        ]).astype(np.float32)
+
+        if joint_list.shape[0] > 0:
+            # `heatmap_upsamp`: (H, W, 19)
+            heatmap_upsamp = cv2.resize(
+                heatmaps, None,
+                fx=model_cfg['stride'],
+                fy=model_cfg['stride'],
+                interpolation=cv2.INTER_CUBIC)
+            if RUN_WITH_CPP:
+                # `joint_list`: (#person * 18, 5)
+                joint_list = np.expand_dims(joint_list, 0)
+                # `paf_upsamp`: (H, W, 38)
             else:
-                X, Y = joint_candidates[index.astype(int), :2]
-            person_keypoint_coordinates.append((X, Y))
-        person_keypoint_coordinates_coco = [None] * 17
-
-        for dt_index, gt_index in dt_gt_mapping.items():
-            if gt_index is None:
-                continue
-            person_keypoint_coordinates_coco[gt_index] = person_keypoint_coordinates[dt_index]
-
-        keypoints.append((person_keypoint_coordinates_coco, 1 - 1.0 / person[-2]))  # s[19] is the score
-
-    for i in range(len(keypoints)):
-        print('the {}th keypoint detection result is : '.format(i), keypoints[i])
-
-    # 畫所有的骨架
-    color_board = [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
-    color_idx = 0
-    for i in draw_list:  # 畫出18個limb　Fixme：我設計了25個limb,畫的limb順序需要調整，相應color數也要增加
-        for n in range(len(person_to_joint_assoc)):
-            index = person_to_joint_assoc[n][np.array(joint2limb_pairs[i])][..., 0]
-            if -1 in index:  # 有-1說明沒有對應的關節點與之相連,即有一個類型的part沒有缺失，無法連接成limb
-                continue
-            # 在上一個cell中有　canvas = cv2.imread(test_image) # B,G,R order
-            cur_canvas = canvas.copy()
-            Y = joint_candidates[index.astype(int), 0]
-            X = joint_candidates[index.astype(int), 1]
-            mX = np.mean(X)
-            mY = np.mean(Y)
-            length = ((X[0] - X[1]) ** 2 + (Y[0] - Y[1]) ** 2) ** 0.5
-            angle = math.degrees(math.atan2(X[0] - X[1], Y[0] - Y[1]))
-            polygon = cv2.ellipse2Poly((int(mY), int(mX)), (int(length / 2), 3), int(angle), 0,
-                                       360, 1)
-
-            cv2.circle(cur_canvas, (int(Y[0]), int(X[0])), 4, color=[0, 0, 0], thickness=2)
-            cv2.circle(cur_canvas, (int(Y[1]), int(X[1])), 4, color=[0, 0, 0], thickness=2)
-            cv2.fillConvexPoly(cur_canvas, polygon, colors[color_board[color_idx]])
-            canvas = cv2.addWeighted(canvas, 0.4, cur_canvas, 0.6, 0)
-        color_idx += 1
-    return canvas
-    return canvas
-
-
-def predict(image, params, model_params, heat_layers, paf_layers, input_image_path):
-    img_h, img_w, _ = image.shape
-    heatmap_avg = np.zeros((image.shape[0], image.shape[1], heat_layers))  # fixme if you change the number of keypoints
-    paf_avg = np.zeros((image.shape[0], image.shape[1], paf_layers))
-
-    multiplier = [x * model_params['boxsize'] / img_h for x in params['scale_search']]  # 按照圖片高度進行縮放
-
-    max_downsample = model_params['max_downsample']
-    pad_value = model_params['padValue']
-    stride = model_params['stride']
-
-    for m in range(len(multiplier)):
-        scale = multiplier[m]
-        img_max_h, img_max_w = (2300, 3200)
-        if scale * img_h > img_max_h or scale * img_w > img_max_w:
-            scale = min(img_max_h / img_h, img_max_w / img_w)
-            print("Input image: '{}' is too big, shrink it!".format(input_image_path))
-
-        imageToTest = cv2.resize(image, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)  # cv2.INTER_CUBIC
-        imageToTest_padded, pad = util.padRightDownCorner(imageToTest,
-                                                          max_downsample,
-                                                          pad_value)
-
-        scale_padH, scale_padW, _ = imageToTest_padded.shape
-
-        input_img = np.float32(imageToTest_padded / 255)
-        swap_image = input_img[:, ::-1, :].copy()
-        input_img = np.concatenate((input_img[None, ...], swap_image[None, ...]), axis=0)  # (2, height, width, channels)
-        input_img = torch.from_numpy(input_img).cuda()
-        output_tuple = posenet(input_img)
-
-        # ############ different scales can be shown #############
-        output = output_tuple[-1][0].cpu().numpy()
-
-        output_blob = output[0].transpose((1, 2, 0))
-        output_paf = output_blob[:, :, :config.paf_layers]
-        output_heatmap = output_blob[:, :, config.paf_layers:config.num_layers]
-
-        output_blob_flip = output[1].transpose((1, 2, 0))
-        output_paf_flip = output_blob_flip[:, :, :config.paf_layers]  # paf layers
-        output_heatmap_flip = output_blob_flip[:, :, config.paf_layers:config.num_layers]  # keypoint layers
-
-        # ################################## flip ensemble ################################
-        output_paf_avg = (output_paf + output_paf_flip[:, ::-1, :][:, :, flip_paf_ord]) / 2
-        output_heatmap_avg = (output_heatmap + output_heatmap_flip[:, ::-1, :][:, :, flip_heat_ord]) / 2
-
-        # extract outputs, resize, and remove padding
-        heatmap = cv2.resize(output_heatmap_avg,
-                             (0, 0),
-                             fx=stride,
-                             fy=stride,
-                             interpolation=cv2.INTER_CUBIC)
-        paf = cv2.resize(output_paf_avg,
-                         (0, 0),
-                         fx=stride,
-                         fy=stride,
-                         interpolation=cv2.INTER_CUBIC)
-
-        heatmap = heatmap[:scale_padH - pad[2], :scale_padW - pad[3], :]
-        paf = paf[:scale_padH - pad[2], :scale_padW - pad[3], :]
-
-        heatmap = cv2.resize(heatmap, (img_w, img_h), interpolation=cv2.INTER_CUBIC)
-        paf = cv2.resize(paf, (img_w, img_h), interpolation=cv2.INTER_CUBIC)
-
-        heatmap_avg = heatmap_avg + heatmap / len(multiplier)
-        paf_avg = paf_avg + paf / len(multiplier)
-        # > DELETED
-        heatmap_avg[np.isnan(heatmap_avg)] = 0
-        paf_avg[np.isnan(paf_avg)] = 0
-
-    return heatmap_avg, paf_avg
-
-
-def find_peaks(heatmap_avg):
-    all_peaks = []
-    peak_counter = 0
-
-    heatmap_avg = heatmap_avg.astype(np.float32)
-
-    filter_map = heatmap_avg[:, :, :18].copy().transpose((2, 0, 1))[None, ...]
-    filter_map = torch.from_numpy(filter_map).cuda()
-
-    filter_map = util.keypoint_heatmap_nms(filter_map, kernel=3, thre=params['thre1'])
-    filter_map = filter_map.cpu().numpy().squeeze().transpose((1, 2, 0))
-
-    for part in range(18):  # 沒有對背景（序號19）取非極大值抑制NMS
-        map_ori = heatmap_avg[:, :, part]
-        peaks_binary = filter_map[:, :, part]
-
-        peaks = list(zip(np.nonzero(peaks_binary)[1], np.nonzero(peaks_binary)[0]))
-        refined_peaks_with_score = [util.refine_centroid(map_ori, anchor, params['offset_radius']) for anchor in peaks]
-
-        id = range(peak_counter, peak_counter + len(refined_peaks_with_score))
-        peaks_with_score_and_id = [refined_peaks_with_score[i] + (id[i],) for i in range(len(id))]
-
-        all_peaks.append(peaks_with_score_and_id)
-        peak_counter += len(peaks)  # refined_peaks
-
-    return all_peaks
-
-
-def find_connections(joint_list, paf_avg, img_width):
-
-    connection_limbs = []
-    special_limb = []
-
-    for pair_id in range(len(joint2limb_pairs)):
-        score_mid = paf_avg[:, :, pair_id]
-        joints_src = joint_list[joint2limb_pairs[pair_id][0]]
-        joints_dst = joint_list[joint2limb_pairs[pair_id][1]]
-
-        if len(joints_src) == 0 and len(joints_dst) == 0:
-            special_limb.append(pair_id)
-            connection_limbs.append([])
-        else:
-            connection_candidates = []
-            for i, joint_src in enumerate(joints_src):
-                for j, joint_dst in enumerate(joints_dst):
-                    joint_src = np.array(joint_src)
-                    joint_dst = np.array(joint_dst)
-                    limb_dir = joint_dst[:2] - joint_src[:2]  # > (x,y)
-                    limb_len = np.sqrt(np.sum(limb_dir ** 2)) + 1e-8
-                    mid_num = min(int(round(limb_len + 1)), params['mid_num'])
-                    if limb_len == 0:  # 為了跳過出現不同節點相互覆蓋出現在同一個位置，也有說norm加一個接近0的項避免分母為0,詳見：
-                        # https://github.com/ZheC/Realtime_Multi-Person_Pose_Estimation/issues/54
-                        continue
-
-                    limb_intermed_x = np.round(np.linspace(start=joint_src[0], stop=joint_dst[0], num=mid_num)).astype(np.intp)
-                    limb_intermed_y = np.round(np.linspace(start=joint_src[1], stop=joint_dst[1], num=mid_num)).astype(np.intp)
-                    limb_response = score_mid[limb_intermed_y, limb_intermed_x]  # > (20,)
-
-                    score_midpts = limb_response
-
-                    connect_score = score_midpts.mean() + min(0.5 * img_width / limb_len - 1, 0)
-                    criterion1 = \
-                        np.count_nonzero(score_midpts > params['thre2']) > mid_num * params['connect_ration']
-                    criterion2 = connect_score > 0
-
-                    if criterion1 and criterion2:
-                        connection_candidates.append([
-                            i, j,
-                            connect_score,
-                            limb_len,
-                            0.5 * connect_score +
-                            0.25 * joint_src[2] +
-                            0.25 * joint_dst[2]
-                        ])
-
-            max_connections = min(len(joints_src), len(joints_dst))
-            connection_candidates = sorted(connection_candidates, key=lambda x: x[4], reverse=True)
-            connections = np.zeros((0, 6))
-            for potential_connect in connection_candidates:  # 根據confidence的順序選擇connections
-                i, j, s, limb_len = potential_connect[0:4]
-                if i not in connections[:, 3] and j not in connections[:, 4]:
-                    connections = np.vstack([
-                        connections,
-                        # `src_peak_id`, `dst_peak_id`, `dist_prior`, `joint_src_id`, `joint_dst_id`, `limb_len`
-                        [joints_src[i][3], joints_dst[j][3], s, i, j, limb_len]
-                    ])  # 後面會被使用
-                    if len(connections) >= max_connections:  # 會出現關節點不夠連的情況
-                        break
-            connection_limbs.append(connections)
-
-    return connection_limbs, special_limb
-
-
-def find_humans(connection_limbs, joint_list, special_limb):
-
-    person_to_joint_assoc = -1 * np.ones((0, 20, 2))
-    joint_candidates = np.array([item for sublist in joint_list for item in sublist])
-
-    len_rate = params['len_rate']
-    connection_tole = params['connection_tole']
-    remove_recon = params['remove_recon']
-
-    for limb_type in range(len(joint2limb_pairs)):
-        if limb_type not in special_limb:
-            joint_src_type, joint_dst_type = joint2limb_pairs[limb_type]
-
-            for person_id, limb_info in enumerate(connection_limbs[limb_type]):
-                limb_src_peak_id = limb_info[0]
-                limb_dst_peak_id = limb_info[1]
-                limb_connect_score = limb_info[2]
-                limb_len = limb_info[-1]
-
-                person_assoc_idx = []
-                for person_id, person_limbs in enumerate(person_to_joint_assoc):
-                    if person_limbs[joint_src_type, 0].astype(int) == limb_src_peak_id.astype(int) or \
-                       person_limbs[joint_dst_type, 0].astype(int) == limb_dst_peak_id.astype(int):
-                        person_assoc_idx.append(person_id)
-
-                if len(person_assoc_idx) == 1:
-                    person_limbs = person_to_joint_assoc[person_assoc_idx[0]]
-                    person_dst_peak_id = person_limbs[joint_dst_type, 0]
-                    person_dst_connect_score = person_limbs[joint_dst_type, 1]
-                    person_limb_len = person_limbs[-1, 1]
-
-                    # dst joint is connected yet.
-                    if person_dst_peak_id.astype(int) == -1 and \
-                       person_limb_len * len_rate > limb_len:
-                        person_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
-                        person_limbs[-1, 0] += 1  # last number in each row is the total parts number of that person
-                        person_limbs[-1, 1] = max(limb_len, person_limb_len)
-                        person_limbs[-2, 0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
-                        # the second last number in each row is the score of the overall configuration
-
-                    # dst joint is connected, but peak_id is not same.
-                    elif person_dst_peak_id.astype(int) != limb_dst_peak_id.astype(int):
-                        # prev score is higher than current one.
-                        if person_dst_connect_score >= limb_connect_score:
-                            pass
-                        else:  # prev score is lower than current one
-                            # TOCHECK: prev limb x 16 is shorter than current limb, then do nothing.
-                            if len_rate * person_limb_len <= limb_len:
-                                continue
-
-                            person_limbs[-2, 0] -= joint_candidates[person_dst_peak_id.astype(int), 2] + \
-                                                   person_dst_connect_score
-                            person_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
-                            person_limbs[-2, 0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + \
-                                                   limb_connect_score
-                            person_limbs[-1, 1] = max(limb_len, person_limb_len)
-
-                    # dst joint is connected, and peak_id is same, but prev score is lower than current one.
-                    elif person_dst_peak_id.astype(int) == limb_dst_peak_id.astype(int) and \
-                         person_dst_connect_score <= limb_connect_score:
-                        # TOCHECK: why compare length?
-                        if len_rate * person_limb_len <= limb_len:
+                # > python
+                for person_id, person in enumerate(person_to_joint_assoc[..., 0]):
+                    human = Human([])
+                    is_added = False
+                    peak_ids = person[:NUM_KEYPOINTS]  # > (18,)
+                    for part_idx, peak_id in enumerate(peak_ids):  # > #kp
+                        if peak_id < 0:
                             continue
-                        person_limbs[-2, 0] -= joint_candidates[person_dst_peak_id.astype(int), 2] + person_dst_connect_score
-                        person_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
-                        person_limbs[-2, 0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
-                        person_limbs[-1, 1] = max(limb_len, person_limb_len)
+                        is_added = True
+                        x, y, peak_score = joint_candidates[peak_id.astype(int), :3]
+                        # x = float(x / heatmap_upsamp.shape[1])
+                        # y = float(y / heatmap_upsamp.shape[0])
+                        human.body_parts[part_idx] = BodyPart(
+                            '%d-%d' % (person_id, part_idx),
+                            part_idx,
+                            x, y,
+                            peak_score
+                        )
+                    if is_added:
+                        limb_score = person[-2]
+                        # TOCHECK: 1 - 1.0 / person[-2]
+                        # limb_score = 1 - 1.0 / person[-2]
+                        human.score = limb_score
+                        humans.append(human)
 
-                elif len(person_assoc_idx) == 2:  # if found 2 and disjoint, merge them (disjoint：不相交)
-                    person1_id, person2_id = person_assoc_idx[0], person_assoc_idx[1]
-                    person1_limbs = person_to_joint_assoc[person1_id]  # > (20,2)
-                    person2_limbs = person_to_joint_assoc[person2_id]  # > (20,2)
-                    person1_limb_len = person1_limbs[-1, 1]
+        centers = {}
+        for human in humans:
+            # > draw points
+            for i in range(CocoPart.Background.value):
+                if i not in human.body_parts.keys():
+                    continue
 
-                    membership1 = ((person1_limbs[..., 0] >= 0).astype(int))[:-2]
-                    membership2 = ((person2_limbs[..., 0] >= 0).astype(int))[:-2]
-                    membership = membership1 + membership2
-                    if len(np.nonzero(membership == 2)[0]) == 0:  # if found 2 and disjoint, merge them
+                body_part = human.body_parts[i]
+                # center = (int(body_part.x * image_w + 0.5), int(body_part.y * image_h + 0.5))
+                center = (int(body_part.x), int(body_part.y))
+                centers[i] = center
+                cv2.circle(canvas, center, 3, CocoColors[i], thickness=3, lineType=8, shift=0)
 
-                        min_limb1 = np.min(person1_limbs[:-2, 1][membership1 == 1])
-                        min_limb2 = np.min(person2_limbs[:-2, 1][membership2 == 1])
-                        min_tolerance = min(min_limb1, min_limb2)
+            # draw lines
+            for pair_order, pair in enumerate(CocoPairsRender):
+                if pair[0] not in human.body_parts.keys() or pair[1] not in human.body_parts.keys():
+                    continue
 
-                        if limb_connect_score < connection_tole * min_tolerance or \
-                           limb_len >= len_rate * person1_limb_len:
-                            continue
+                cv2.line(canvas, centers[pair[0]], centers[pair[1]], CocoColors[pair_order], 3)
 
-                        person1_limbs[:-2][...] += (person2_limbs[:-2][...] + 1)
-                        person1_limbs[-2:][:, 0] += person2_limbs[-2:][:, 0]
-                        person1_limbs[-2, 0] += limb_connect_score
-                        person1_limbs[-1, 1] = max(limb_len, person1_limb_len)
-                        person_to_joint_assoc = np.delete(person_to_joint_assoc, person2_id, 0)
+        toc = time.time()
+        print('> [original drawing] elapsed = ', toc - tic)
+    else:
+        tic = time.time()
+        # `person_to_joint_assoc`: (#person, 20, 2)
+        for person in person_to_joint_assoc[..., 0]:  # > (#person, 20)
+            peak_ids = person[:NUM_KEYPOINTS]  # > (18,)
+            person_keypoint_coordinates = []  # > (18, [x,y])
+            for peak_id in peak_ids:
+                if peak_id == -1:
+                    # "No candidate for keypoint" # 標誌為-1的part是沒有檢測到的
+                    X, Y = 0, 0
+                else:
+                    X, Y = joint_candidates[peak_id.astype(int), :2]  # > (#peaks, [x,y,score,id]) -> [x,y]
+                person_keypoint_coordinates.append((X, Y))
+            person_keypoint_coordinates_coco = [None] * 17  # (17,)
+            # > TOCHECK: why use custom pairs instead of using coco pairs?
+            for dt_index, gt_index in dt_gt_mapping.items():  # > (18,): {cmu_id:coco_id}
+                if gt_index is None:
+                    continue
+                person_keypoint_coordinates_coco[gt_index] = person_keypoint_coordinates[dt_index]
 
-                    else:
-                        if limb_src_peak_id in person1_limbs[:-2, 0]:
-                            c1 = np.where(person1_limbs[:-2, 0] == limb_src_peak_id)
-                            c2 = np.where(person2_limbs[:-2, 0] == limb_dst_peak_id)
-                        else:
-                            c1 = np.where(person1_limbs[:-2, 0] == limb_dst_peak_id)
-                            c2 = np.where(person2_limbs[:-2, 0] == limb_src_peak_id)
+            # person[-2] is the score
+            humans.append((person_keypoint_coordinates_coco, 1 - 1.0 / person[-2]))
 
-                        c1 = int(c1[0])
-                        c2 = int(c2[0])
-                        assert c1 != c2, "an candidate keypoint is used twice, shared by two people"
+        # 畫所有的骨架
+        color_board = [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        color_idx = 0
+        for i in draw_list:  # > #limbs
+            for person_id, person in enumerate(person_to_joint_assoc):  # > (#person, 20, 2) -> #person
+                peak_ids = person[joint2limb_pairs[i], 0].astype(int)  # (2, 2) -> (2,)
+                if -1 in peak_ids:  # 有-1說明沒有對應的關節點與之相連,即有一個類型的part沒有缺失，無法連接成limb
+                    continue
+                # 在上一個cell中有　canvas = cv2.imread(test_image) # B,G,R order
+                cur_canvas = canvas.copy()
+                Xs = joint_candidates[peak_ids, 0]  # > (#peaks, [x,y,score,id]) -> (x1,x2)
+                Ys = joint_candidates[peak_ids, 1]  # > (#peaks, [x,y,score,id]) -> (y1,y2)
+                mXs = np.mean(Xs)
+                mYs = np.mean(Ys)
+                length = ((Ys[0] - Ys[1]) ** 2 + (Xs[0] - Xs[1]) ** 2) ** 0.5
+                angle = math.degrees(math.atan2(Ys[0] - Ys[1], Xs[0] - Xs[1]))
+                polygon = cv2.ellipse2Poly((int(mXs), int(mYs)), (int(length / 2), 3), int(angle), 0, 360, 1)
 
-                        if limb_connect_score < person1_limbs[c1, 1] and \
-                            limb_connect_score < person2_limbs[c2, 1]:
-                            continue  # the trick here is useful
-
-                        small_j = person1_id
-                        big_j = person2_id
-                        remove_c = c1
-
-                        if person1_limbs[c1, 1] > person2_limbs[c2, 1]:
-                            small_j = person2_id
-                            big_j = person1_id
-                            remove_c = c2
-                        if remove_recon > 0:
-                            person_to_joint_assoc[small_j, -2, 0] -= \
-                                joint_candidates[person_to_joint_assoc[small_j, remove_c, 0].astype(int), 2] + \
-                                person_to_joint_assoc[small_j, remove_c, 1]
-                            person_to_joint_assoc[small_j, remove_c, 0] = -1
-                            person_to_joint_assoc[small_j, remove_c, 1] = -1
-                            person_to_joint_assoc[small_j, -1, 0] -= 1
-
-                elif limb_type < len(joint2limb_pairs):
-                    row = -1 * np.ones((20, 2))
-                    row[joint_src_type] = [limb_src_peak_id, limb_connect_score]
-                    row[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
-                    row[-1] = [2, limb_len]
-                    row[-2][0] = sum(joint_candidates[limb_info[:2].astype(int), 2]) + limb_connect_score
-                    row = row[np.newaxis, :, :]  # 為了進行concatenate，需要插入一個軸
-                    person_to_joint_assoc = np.concatenate((person_to_joint_assoc, row), axis=0)
-
-    # delete some rows of subset which has few parts occur
-    people_to_delete = []
-    for person_id, person_info in enumerate(person_to_joint_assoc):
-        # CHANGED: 4 -> 2
-        if person_info[-1, 0] < 4 or person_info[-2, 0] / person_info[-1, 0] < 0.45:
-            people_to_delete.append(person_id)
-    person_to_joint_assoc = np.delete(person_to_joint_assoc, people_to_delete, axis=0)
-
-    return person_to_joint_assoc, joint_candidates
+                cv2.circle(cur_canvas, (int(Xs[0]), int(Ys[0])), 4, color=[0, 0, 0], thickness=2)
+                cv2.circle(cur_canvas, (int(Xs[1]), int(Ys[1])), 4, color=[0, 0, 0], thickness=2)
+                cv2.fillConvexPoly(cur_canvas, polygon, colors[color_board[color_idx]])
+                canvas = cv2.addWeighted(canvas, 0.4, cur_canvas, 0.6, 0)
+            color_idx += 1
+        toc = time.time()
+        print('> [original drawing] elapsed = ', toc - tic)
+    return canvas
 
 
 def show_color_vector(oriImg, paf_avg, heatmap_avg):
@@ -470,7 +254,7 @@ if __name__ == '__main__':
     output = args.output
 
     posenet = NetworkEval(opt, config, bn=True)
-
+    print('> Model = ', posenet)
     print('Resuming from checkpoint ...... ')
     checkpoint = torch.load(opt.ckpt_path, map_location=torch.device('cpu'))  # map to cpu to save the gpu memory
     posenet.load_state_dict(checkpoint['weights'])  # 加入他人訓練的模型，可能需要忽略部分層，則strict=False
@@ -479,26 +263,25 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         posenet.cuda()
 
-    from apex import amp
-
     posenet = amp.initialize(posenet,
                              opt_level=args.opt_level,
                              keep_batchnorm_fp32=args.keep_batchnorm_fp32,
                              loss_scale=args.loss_scale)
     posenet.eval()  # set eval mode is important
 
-    tic = time.time()
-    print('start processing...')
     # load config
     params, model_params = config_reader()
     tic = time.time()
-    # generate image with body parts
     with torch.no_grad():
-        canvas = process(input_image, params, model_params, config.heat_layers + 2,
+        canvas = process(input_image,
+                         posenet,
+                         params,
+                         model_params,
+                         config.heat_layers + 2,
                          config.paf_layers)  # todo background + 2
 
     toc = time.time()
     print('processing time is %.5f' % (toc - tic))
 
-    plt.imshow(canvas[:, :, [2,1,0]])
+    plt.imshow(canvas[:, :, [2, 1, 0]])
     plt.show()

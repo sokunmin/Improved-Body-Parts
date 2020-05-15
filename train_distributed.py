@@ -197,7 +197,7 @@ if args.resume:
 
 train_sampler = None
 val_sampler = None
-# Restricts data loading to a subset of the dataset exclusive to the current process
+# Restricts data loading to a skeletons of the dataset exclusive to the current process
 
 # 创建分布式采样器来控制训练中节点间的数据分发
 # Create `DistributedSampler` to handle distributing the dataset across nodes when training

@@ -185,7 +185,7 @@ if args.resume:
 
 train_sampler = None
 val_sampler = None
-# Restricts data loading to a subset of the dataset exclusive to the current process
+# Restricts data loading to a skeletons of the dataset exclusive to the current process
 # Create DistributedSampler to handle distributing the dataset across nodes when training 创建分布式采样器来控制训练中节点间的数据分发
 # This can only be called after distributed.init_process_group is called 这个只能在 distributed.init_process_group 被调用后调用
 # 这个对象控制进入分布式环境的数据集以确保模型不是对同一个子数据集训练，以达到训练目标。
