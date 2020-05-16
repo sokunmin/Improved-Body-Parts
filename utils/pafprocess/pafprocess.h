@@ -67,7 +67,7 @@ struct Connection {
 
 int process_paf(int p1, int p2, int p3, float *peaks, int h1, int h2, int h3, float *heatmap, int f1, int f2, int f3, float *pafmap);
 int get_num_humans();
-int get_part_conn_id(int skeleton_id, int part_id);
+int get_part_peak_id(int skeleton_id, int part_id);
 float get_score(int skeleton_id);
 int get_part_x(int cid);
 int get_part_y(int cid);

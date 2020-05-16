@@ -149,8 +149,7 @@ class CanonicalConfig:
         # For the flip augmentation in the inference process only
         self.flip_heat_ord = np.array([0, 1, 5, 6, 7, 2, 3, 4, 11, 12, 13, 8, 9, 10, 15, 14, 17, 16, 18, 19])
         self.flip_paf_ord = np.array(
-            [0, 2, 1, 4, 3, 6, 5, 8, 7, 12, 13, 14, 9, 10, 11, 18, 19, 20, 15, 16, 17, 22, 21, 25, 26, 23, 24, 28, 27,
-             29])
+            [0, 2, 1, 4, 3, 6, 5, 8, 7, 12, 13, 14, 9, 10, 11, 18, 19, 20, 15, 16, 17, 22, 21, 25, 26, 23, 24, 28, 27, 29])
 
         self.draw_list = [0] + list(range(5, 21)) + [29]
 

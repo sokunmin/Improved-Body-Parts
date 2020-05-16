@@ -293,7 +293,7 @@ int get_num_humans() {
     return skeletons.size();
 }
 
-int get_part_conn_id(int skeleton_id, int part_id) {
+int get_part_peak_id(int skeleton_id, int part_id) {
     return skeletons[skeleton_id][part_id].id;
 }
 

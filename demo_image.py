@@ -20,6 +20,7 @@ from apex import amp
 
 from utils.common import BodyPart, Human, CocoPart, CocoColors, CocoPairsRender
 from utils.config_reader import config_reader
+from utils.pafprocess import pafprocess
 from utils.parse_skeletons import predict, find_peaks, find_connections, find_humans, heatmap_nms, predict_refactor
 
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"  # choose the available GPUs
@@ -37,7 +38,7 @@ parser = argparse.ArgumentParser(description='PoseNet Training')
 parser.add_argument('--resume', '-r', action='store_true', default=True, help='resume from checkpoint')
 parser.add_argument('--max_grad_norm', default=5, type=float,
                     help="If the norm of the gradient vector exceeds this, re-normalize it to have the norm equal to max_grad_norm")
-parser.add_argument('--image', type=str, default='try_image/20_p.jpg', help='input image')  # required=True
+parser.add_argument('--image', type=str, default='try_image/3_p.jpg', help='input image')  # required=True
 parser.add_argument('--output', type=str, default='result.jpg', help='output image')
 parser.add_argument('--opt-level', type=str, default='O1')
 parser.add_argument('--keep-batchnorm-fp32', type=str, default=None)
@@ -56,8 +57,8 @@ flip_paf_ord = config.flip_paf_ord
 draw_list = config.draw_list
 
 NUM_KEYPOINTS = 18
-RUN_REFACTOR = False
-RUN_WITH_CPP = False
+RUN_REFACTOR = True
+RUN_WITH_CPP = True
 
 
 # ###############################################################################################################
@@ -65,13 +66,15 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
     ori_img = cv2.imread(input_image_path)
     image_h, image_w, _ = ori_img.shape
 
-    # > [1]
+    # > python
     if RUN_REFACTOR:
+        # > [1]
         tic = time.time()
         heatmaps, pafs = predict_refactor(ori_img, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=config)
         all_peaks = heatmap_nms(heatmaps, model_cfg['stride'])
         toc = time.time()
         print('> [original drawing] heatmap elapsed = ', toc - tic)
+        # `paf_upsamp`: (H, W, 30)
         pafs = cv2.resize(pafs, None,
                           fx=model_cfg['stride'],
                           fy=model_cfg['stride'],
@@ -84,9 +87,13 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
         toc = time.time()
         print('> [original drawing] heatmap elapsed = ', toc - tic)
 
-    # show_color_vector(ori_img, pafs, heatmaps)
-    connected_limbs, special_limb = find_connections(all_peaks, pafs, image_h, test_cfg, joint2limb_pairs)
-    person_to_joint_assoc, joint_candidates = find_humans(connected_limbs, special_limb, all_peaks, test_cfg, joint2limb_pairs)
+    # > python
+    if not RUN_WITH_CPP:
+        # MY-TODO: refactor `show_color_vector` method.
+        # show_color_vector(ori_img, pafs, heatmaps)
+
+        connected_limbs, special_limb = find_connections(all_peaks, pafs, image_h, test_cfg, joint2limb_pairs)
+        person_to_joint_assoc, joint_candidates = find_humans(connected_limbs, special_limb, all_peaks, test_cfg, joint2limb_pairs)
 
     canvas = cv2.imread(input_image)  # B,G,R order
 
@@ -100,16 +107,36 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
         ]).astype(np.float32)
 
         if joint_list.shape[0] > 0:
-            # `heatmap_upsamp`: (H, W, 19)
-            heatmap_upsamp = cv2.resize(
-                heatmaps, None,
-                fx=model_cfg['stride'],
-                fy=model_cfg['stride'],
-                interpolation=cv2.INTER_CUBIC)
             if RUN_WITH_CPP:
+                # `heatmap_upsamp`: (H, W, 19)
+                heatmap_upsamp = cv2.resize(
+                    heatmaps, None,
+                    fx=model_cfg['stride'],
+                    fy=model_cfg['stride'],
+                    interpolation=cv2.INTER_CUBIC)
                 # `joint_list`: (#person * 18, 5)
                 joint_list = np.expand_dims(joint_list, 0)
-                # `paf_upsamp`: (H, W, 38)
+                paf_upsamp = pafs
+                pafprocess.process_paf(joint_list, heatmap_upsamp, paf_upsamp)
+                for human_id in range(pafprocess.get_num_humans()):
+                    human = Human([])
+                    is_added = False
+                    for part_idx in range(NUM_KEYPOINTS):
+                        peak_id = int(pafprocess.get_part_peak_id(human_id, part_idx))
+                        if peak_id < 0:
+                            continue
+                        is_added = True
+                        human.body_parts[part_idx] = BodyPart(
+                            '%d-%d' % (human_id, part_idx), part_idx,
+                            # TOCHECK: divided by [H, W] ?
+                            pafprocess.get_part_x(peak_id),
+                            pafprocess.get_part_y(peak_id),
+                            pafprocess.get_part_score(peak_id)
+                        )
+                    if is_added:
+                        score = pafprocess.get_score(human_id)
+                        human.score = score
+                        humans.append(human)
             else:
                 # > python
                 for person_id, person in enumerate(person_to_joint_assoc[..., 0]):
@@ -121,8 +148,6 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
                             continue
                         is_added = True
                         x, y, peak_score = joint_candidates[peak_id.astype(int), :3]
-                        # x = float(x / heatmap_upsamp.shape[1])
-                        # y = float(y / heatmap_upsamp.shape[0])
                         human.body_parts[part_idx] = BodyPart(
                             '%d-%d' % (person_id, part_idx),
                             part_idx,
