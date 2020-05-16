@@ -62,8 +62,8 @@ joint2limb_pairs = config.limbs_conn  # > 30
 dt_gt_mapping = config.dt_gt_mapping
 NUM_KEYPOINTS = 18
 NUM_COCO_KEYPOINTS = 17
-RUN_REFACTOR = False
-RUN_WITH_CPP = False
+RUN_REFACTOR = True
+RUN_WITH_CPP = True
 TEST_SET = 'val2017'
 
 
@@ -131,7 +131,7 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
                         )
                     if is_added:
                         score = pafprocess.get_score(human_id)
-                        human.score = score
+                        human.score = 1 - 1.0 / score
                         humans.append(human)
             else:
                 # > python
@@ -155,7 +155,7 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
                         limb_score = person[-2]
                         # TOCHECK: 1 - 1.0 / person[-2]
                         # limb_score = 1 - 1.0 / person[-2]
-                        human.score = limb_score
+                        human.score = 1 - 1.0 / limb_score  # TOCHECK: w/ or w/o ?
                         humans.append(human)
 
     else:
@@ -205,10 +205,10 @@ def append_result(image_id, humans, all_outputs):
                     cmu_keypoints[i, 1] = body_part.y
                     cmu_keypoints[i, 2] = 1
 
+            coco_keypoints = cmu_keypoints[ORDER_COCO, :]
             one_result["image_id"] = image_id
-            one_result["score"] = 1.
-            cmu_keypoints = cmu_keypoints[ORDER_COCO, :]
-            one_result["keypoints"] = list(cmu_keypoints.reshape(NUM_KEYPOINTS * 3))
+            one_result["keypoints"] = list(coco_keypoints.reshape(NUM_COCO_KEYPOINTS * 3))
+            one_result["score"] = human.score
 
             all_outputs.append(one_result)
     else:
