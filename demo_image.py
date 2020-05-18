@@ -58,7 +58,7 @@ flip_paf_ord = config.flip_paf_ord
 draw_list = config.draw_list
 
 NUM_KEYPOINTS = 18
-RUN_REFACTOR = True
+RUN_REFACTOR = False
 RUN_WITH_CPP = False
 
 PICKEL_ORIGINAL_P1_NAME = '1_ppl_original.pkl'
@@ -111,7 +111,7 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
             heatmaps, pafs = load_pickle_as_output(PICKEL_ORIGINAL_P1_NAME)
         else:
             heatmaps, pafs = predict(ori_img, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=config)
-        # output_to_pickle(heatmaps, pafs, PICKEL_REFACTOR_P1_NAME)
+        # output_to_pickle(heatmaps, pafs, PICKEL_ORIGINAL_P1_NAME)
         all_peaks = find_peaks(heatmaps, test_cfg)
         toc = time.time()
         print('> [original drawing] heatmap elapsed = ', toc - tic)
