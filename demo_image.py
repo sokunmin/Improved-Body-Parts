@@ -12,6 +12,7 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import pickle
 
 from config.config import GetConfig, TrainingOpt
 # from demo_image_orig import show_color_vector
@@ -38,7 +39,7 @@ parser = argparse.ArgumentParser(description='PoseNet Training')
 parser.add_argument('--resume', '-r', action='store_true', default=True, help='resume from checkpoint')
 parser.add_argument('--max_grad_norm', default=5, type=float,
                     help="If the norm of the gradient vector exceeds this, re-normalize it to have the norm equal to max_grad_norm")
-parser.add_argument('--image', type=str, default='try_image/3_p.jpg', help='input image')  # required=True
+parser.add_argument('--image', type=str, default='try_image/1_p.jpg', help='input image')  # required=True
 parser.add_argument('--output', type=str, default='result.jpg', help='output image')
 parser.add_argument('--opt-level', type=str, default='O1')
 parser.add_argument('--keep-batchnorm-fp32', type=str, default=None)
@@ -58,7 +59,27 @@ draw_list = config.draw_list
 
 NUM_KEYPOINTS = 18
 RUN_REFACTOR = True
-RUN_WITH_CPP = True
+RUN_WITH_CPP = False
+
+PICKEL_ORIGINAL_P1_NAME = '1_ppl_original.pkl'
+PICKEL_REFACTOR_P1_NAME = '1_ppl_refactor.pkl'
+
+LOAD_FROM_PICKLE = False
+
+
+def output_to_pickle(heatmaps, pafs, out_name):
+    with open(out_name, 'wb') as f:
+        inputs = dict(
+            heatmaps=heatmaps,
+            pafs=pafs
+        )
+        pickle.dump(inputs, f)
+
+
+def load_pickle_as_output(pkl_path):
+    with open(pkl_path, 'rb') as f:
+        outputs = pickle.load(f)
+    return outputs.values()
 
 
 # ###############################################################################################################
@@ -70,10 +91,14 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
     if RUN_REFACTOR:
         # > [1]
         tic = time.time()
-        heatmaps, pafs = predict_refactor(ori_img, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=config)
+        if LOAD_FROM_PICKLE:
+            heatmaps, pafs = load_pickle_as_output(PICKEL_REFACTOR_P1_NAME)
+        else:
+            heatmaps, pafs = predict_refactor(ori_img, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=config)
+        # output_to_pickle(heatmaps, pafs, PICKEL_REFACTOR_P1_NAME)
         all_peaks = heatmap_nms(heatmaps, model_cfg['stride'])
         toc = time.time()
-        print('> [original drawing] heatmap elapsed = ', toc - tic)
+        print('> [refactored drawing] heatmap elapsed = ', toc - tic)
         # `paf_upsamp`: (H, W, 30)
         pafs = cv2.resize(pafs, None,
                           fx=model_cfg['stride'],
@@ -82,7 +107,11 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
     else:
         tic = time.time()
         # > [2] `heatmaps`, `pafs` are already upsampled in `predict()`
-        heatmaps, pafs = predict(ori_img, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=config)
+        if LOAD_FROM_PICKLE:
+            heatmaps, pafs = load_pickle_as_output(PICKEL_ORIGINAL_P1_NAME)
+        else:
+            heatmaps, pafs = predict(ori_img, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=config)
+        # output_to_pickle(heatmaps, pafs, PICKEL_REFACTOR_P1_NAME)
         all_peaks = find_peaks(heatmaps, test_cfg)
         toc = time.time()
         print('> [original drawing] heatmap elapsed = ', toc - tic)
@@ -279,19 +308,19 @@ if __name__ == '__main__':
     output = args.output
 
     posenet = NetworkEval(opt, config, bn=True)
-    print('> Model = ', posenet)
-    print('Resuming from checkpoint ...... ')
-    checkpoint = torch.load(opt.ckpt_path, map_location=torch.device('cpu'))  # map to cpu to save the gpu memory
-    posenet.load_state_dict(checkpoint['weights'])  # 加入他人訓練的模型，可能需要忽略部分層，則strict=False
-    print('Network weights have been resumed from checkpoint...')
+    if not LOAD_FROM_PICKLE:
+        print('Resuming from checkpoint ...... ')
+        checkpoint = torch.load(opt.ckpt_path, map_location=torch.device('cpu'))  # map to cpu to save the gpu memory
+        posenet.load_state_dict(checkpoint['weights'])  # 加入他人訓練的模型，可能需要忽略部分層，則strict=False
+        print('Network weights have been resumed from checkpoint...')
 
-    if torch.cuda.is_available():
-        posenet.cuda()
+        if torch.cuda.is_available():
+            posenet.cuda()
 
-    posenet = amp.initialize(posenet,
-                             opt_level=args.opt_level,
-                             keep_batchnorm_fp32=args.keep_batchnorm_fp32,
-                             loss_scale=args.loss_scale)
+        posenet = amp.initialize(posenet,
+                                 opt_level=args.opt_level,
+                                 keep_batchnorm_fp32=args.keep_batchnorm_fp32,
+                                 loss_scale=args.loss_scale)
     posenet.eval()  # set eval mode is important
 
     # load config
