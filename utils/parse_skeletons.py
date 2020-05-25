@@ -19,6 +19,12 @@ NUM_HEATMAPS = NUM_KEYPOINTS + 2
 NUM_PAFS = 30
 
 
+def copy_to_clipboard(inputs):
+    import pandas as pd
+    dt = pd.DataFrame(inputs)
+    dt.to_clipboard(False, False)
+
+
 def predict_refactor(image, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=None):
     # > scale feature maps up to image size
     img_h, img_w, _ = image.shape
@@ -84,8 +90,7 @@ def predict_refactor(image, model, test_cfg, model_cfg, input_image_path, flip_a
         # > `[1-5]`: flip ensemble & average
         if flip_avg:
             output_paf_avg = (output_paf + output_paf_flip[:, ::-1, :][:, :, flip_paf_ord]) / 2  # > (featH, featW, 30)
-            output_heatmap_avg = (output_heatmap + output_heatmap_flip[:, ::-1, :][:, :,
-                                                   flip_heat_ord]) / 2  # > (featH, featW, 20)
+            output_heatmap_avg = (output_heatmap + output_heatmap_flip[:, ::-1, :][:, :, flip_heat_ord]) / 2  # > (featH, featW, 20)
         else:
             output_paf_avg = output_paf  # > (featH, featW, 30)
             output_heatmap_avg = output_heatmap  # > (featH, featW, 20)
@@ -95,7 +100,7 @@ def predict_refactor(image, model, test_cfg, model_cfg, input_image_path, flip_a
             output_paf_avg = cv2.warpAffine(output_paf_avg, rotate_matrix_reverse, (0, 0))
         heatmap_avg = output_heatmap_avg
         paf_avg = output_paf_avg
-    return heatmap_avg, paf_avg
+    return heatmap_avg.astype(np.float32), paf_avg.astype(np.float32)
 
 
 def find_peaks_refactor(param, img):
@@ -115,7 +120,7 @@ def find_peaks_refactor(param, img):
 
 
 def compute_resized_coords(coords, resizeFactor):
-    return (np.array(coords, dtype=float) + 0.5) * resizeFactor - 0.5
+    return (np.array(coords, dtype=np.float32) + 0.5) * resizeFactor - 0.5
 
 
 def heatmap_nms(heatmaps, upsample_factor=1., bool_refine_center=True):
@@ -132,7 +137,7 @@ def heatmap_nms(heatmaps, upsample_factor=1., bool_refine_center=True):
     for joint in range(NUM_KEYPOINTS):
         map_orig = heatmaps[:, :, joint]  # > (featH, featW)
         peak_coords = find_peaks_refactor(0.1, map_orig)  # `thres`: 0.1
-        peaks = np.zeros((len(peak_coords), 4))  # > (#peaks, (x,y,score,peak_id))
+        peaks = np.zeros((len(peak_coords), 4), dtype=np.float32)  # > (#peaks, (x,y,score,peak_id))
         for i, peak in enumerate(peak_coords):
             if bool_refine_center:
                 x_min, y_min = np.maximum(0, peak - win_size)
@@ -320,8 +325,8 @@ def find_connections(all_peaks, paf_avg, img_height, test_cfg, joint2limb_pairs)
     # > `all_peaks`: (#kp, (x,y,score,kp_id)
     connected_limbs = []  # > (#connect, 6=(src_peak_id, dst_peak_id, score, joint_src_id, joint_dst_id, limb_len))
     special_limb = []
-    paf_thresh = test_cfg['thre2']
-    connect_ration = test_cfg['connect_ration']
+    paf_thresh = test_cfg['thre2']  # 0.1
+    connect_ration = test_cfg['connect_ration']  # 0.8
     # > `#limb` = `#connection` = `#paf_channel`, `limb_pairs[i]`=(kp_id1, kp_id2)
     for pair_id in range(len(joint2limb_pairs)):  # > 30 pairs, 最外层的循环是某一个limb_pairs，因为mapIdx个数与之是一致对应的
         # 某一个channel上limb的响应热图, 它的长宽与原始输入图片大小一致，前面经过resize了
@@ -330,7 +335,6 @@ def find_connections(all_peaks, paf_avg, img_height, test_cfg, joint2limb_pairs)
         # `all_peaks(list)`: (#kp, #peaks, (x,y,score,id)), 每一行也是一个list,保存了检测到的特定的parts(joints)
         joints_src = all_peaks[joint2limb_pairs[pair_id][0]]  # > `all_peaks` -> `kp_id1` -> (x,y,score,id)
         joints_dst = all_peaks[joint2limb_pairs[pair_id][1]]  # > `all_peaks` -> `kp_id2` -> (x,y,score,id)
-
         if len(joints_src) == 0 and len(joints_dst) == 0:
             special_limb.append(pair_id)
             connected_limbs.append([])
@@ -345,47 +349,43 @@ def find_connections(all_peaks, paf_avg, img_height, test_cfg, joint2limb_pairs)
                     limb_dir = joint_dst[:2] - joint_src[:2]  # > (x,y)
                     # Compute the distance/length of the potential limb (norm of limb_dir)
                     # limb_len = np.sqrt(limb_dir[0] * limb_dir[0] + limb_dir[1] * limb_dir[1])  # > `limb_len`: scalar
-                    limb_len = np.sqrt(np.sum(limb_dir ** 2)) + 1e-8
-
+                    limb_len = np.sqrt(np.sum(limb_dir ** 2))
                     mid_num = min(int(round(limb_len + 1)), test_cfg['mid_num'])  # > `mid_num`: 20
 
-                    # TOCHECK: failure case when 2 body parts overlaps
-                    if limb_len == 0:  # 为了跳过出现不同节点相互覆盖出现在同一个位置，也有说norm加一个接近0的项避免分母为0
+                    # # TOCHECK: failure case when 2 body parts overlaps
+                    if limb_len == 0.0:  # 为了跳过出现不同节点相互覆盖出现在同一个位置，也有说norm加一个接近0的项避免分母为0
                         # SEE：https://github.com/ZheC/Realtime_Multi-Person_Pose_Estimation/issues/54
                         continue
 
                     # > [new]: (20,) , MY-TODO: re-written into C++
                     limb_intermed_x = np.round(np.linspace(start=joint_src[0], stop=joint_dst[0], num=mid_num)).astype(np.intp)
                     limb_intermed_y = np.round(np.linspace(start=joint_src[1], stop=joint_dst[1], num=mid_num)).astype(np.intp)
-                    limb_response = score_mid[limb_intermed_y, limb_intermed_x]  # > (20,)
+                    limb_response = score_mid[limb_intermed_y, limb_intermed_x]  # > (H, W) ->  (mid_num,)
 
                     score_midpts = limb_response  # > (mid_num,)
                     # > `score_with_dist_prior`: scalar
                     connect_score = score_midpts.mean() + min(0.5 * img_height / limb_len - 1, 0)
+
                     # 这一项是为了惩罚过长的connection, 只有当长度大于图像高度的一半时才会惩罚 todo
                     # The term of sum(score_midpts)/len(score_midpts), see the link below.
                     # https://github.com/michalfaber/keras_Realtime_Multi-Person_Pose_Estimation/issues/48
                     # > `thre2`: 0.1, `connect_ration`: 0.8 -> `criterion1`: True/False
                     criterion1 = \
-                        np.count_nonzero(score_midpts > paf_thresh) >= mid_num * connect_ration
+                        np.count_nonzero(score_midpts > paf_thresh) > mid_num * connect_ration  # TOCHECK `>=` or `>`?
                     # 我认为这个判别标准是保证paf朝向的一致性  threshold = param['thre2'] =0.12
                     # CMU原始项目中parm['thre2'] = 0.05
                     criterion2 = connect_score > 0  # > True/False
 
                     if criterion1 and criterion2:
-                        # > TOCHECK: [0.5, 0.25, 0.25] -> (candA_id, candB_id, dist_prior, limb_len, `confidence`)
+                        overall_score = 0.5 * connect_score + 0.25 * joint_src[2] + 0.25 * joint_dst[2]
                         connection_candidates.append([
                             i, j,
                             connect_score,
                             limb_len,
                             # TOCHECK: weighted sum?
                             #  CHANGED: can be optimized if weights are removed
-                            0.5 * connect_score +
-                            0.25 * joint_src[2] +
-                            0.25 * joint_dst[2]
+                            overall_score
                         ])
-                        # connection_candidate排序的依据是dist prior概率和两个端点heat map预测的概率值
-                        # How to understand the criterion?
 
             # sort by `confidence` -> (#person, (candA_id, candB_id, dist_prior, limb_len, `confidence`)) -> [max, ..., min]
             connection_candidates = sorted(connection_candidates, key=lambda x: x[4], reverse=True)
@@ -393,16 +393,16 @@ def find_connections(all_peaks, paf_avg, img_height, test_cfg, joint2limb_pairs)
             # DELETED: sort之后可以把最可能是limb的留下，而把和最可能是limb的端点竞争的端点删除
             max_connections = min(len(joints_src), len(joints_dst))
             connections = np.zeros((0, 6))
-            for potential_connect in connection_candidates:  # 根據confidence的順序選擇connections
-                i, j, s, limb_len = potential_connect[0:4]
+
+            for connect_idx, potential_connect in enumerate(connection_candidates):  # 根據confidence的順序選擇connections
+                i, j, score, limb_len, overall_score = potential_connect
                 if i not in connections[:, 3] and j not in connections[:, 4]:
                     # 进行判断确保不会出现两个端点集合A,B中，出现一个集合中的点与另外一个集合中两个点同时相连
                     connections = np.vstack([
                         connections,
                         # `src_peak_id`, `dst_peak_id`, `dist_prior`, `joint_src_id`, `joint_dst_id`, `limb_len`
-                        [joints_src[i][3], joints_dst[j][3], s, i, j, limb_len]
+                        [joints_src[i][3], joints_dst[j][3], score, i, j, limb_len]
                     ])  # > (#connect, 6)
-
                     if len(connections) >= max_connections:  # 會出現關節點不夠連的情況
                         break
             connected_limbs.append(connections)
@@ -426,20 +426,19 @@ def find_humans(connected_limbs, special_limb, joint_list, test_cfg, joint2limb_
     # `joint_list` -> `candidate`: (#kp * person, (x,y,score,peak_id))
     joint_candidates = np.array([item for sublist in joint_list for item in sublist])
 
-    len_rate = test_cfg['len_rate']
-    connection_tole = test_cfg['connection_tole']
-    delete_shared_joints = test_cfg['remove_recon']
+    len_rate = test_cfg['len_rate']  # 16
+    connection_tole = test_cfg['connection_tole']  # 0.7
+    delete_shared_joints = test_cfg['remove_recon']  # False
 
     for limb_type in range(len(joint2limb_pairs)):  # > #pairs
         if limb_type not in special_limb:  # > limb is connected and exists (PAF)
             joint_src_type, joint_dst_type = joint2limb_pairs[limb_type]
 
-            for limb_id, limb_info in enumerate(connected_limbs[limb_type]):
+            for limb_idx, limb_info in enumerate(connected_limbs[limb_type]):
                 limb_src_peak_id = limb_info[0]
                 limb_dst_peak_id = limb_info[1]
                 limb_connect_score = limb_info[2]
                 limb_len = limb_info[-1]
-
                 person_assoc_idx = []
                 for person_id, person1_limbs in enumerate(person_to_joint_assoc):  # > #person
                     if person1_limbs[joint_src_type, 0] == limb_src_peak_id or \
@@ -464,7 +463,6 @@ def find_humans(connected_limbs, special_limb, joint_list, test_cfg, joint2limb_
                         # 会加１，结果造成一个人的part之和>18。不过如果两侧预测limb端点结果不同，还是会出现number of part>18，造成多检
                         # TOCHECK: 没有利用好冗余的connection信息，最后两个limb的端点与之前循环过程中重复了，但没有利用聚合，
                         #  只是直接覆盖，其实直接覆盖是为了弥补漏检
-
                         person1_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
                         person1_limbs[-1, 0] += 1  # last number in each row is the total parts number of that person
                         person1_limbs[-1, 1] = max(limb_len, person1_limb_len)
@@ -476,20 +474,18 @@ def find_humans(connected_limbs, special_limb, joint_list, test_cfg, joint2limb_
                          person1_dst_connect_score <= limb_connect_score and \
                          person1_limb_len * len_rate > limb_len:
                         # keep original id and score, and then replace lower score with higher one.
-                        person1_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
                         person1_limbs[-2, 0] -= joint_candidates[person1_dst_peak_id.astype(int), 2] + person1_dst_connect_score
-                        person1_limbs[-2, 0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
-                        # choose longer limb
+                        person1_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
                         person1_limbs[-1, 1] = max(limb_len, person1_limb_len)
+                        person1_limbs[-2, 0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
 
                     # dst joint is connected, and peak_id is same, but prev score is lower than current one.
                     elif person1_dst_peak_id.astype(int) == limb_dst_peak_id.astype(int) and \
                          person1_dst_connect_score <= limb_connect_score:
-
-                        person1_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
                         person1_limbs[-2, 0] -= joint_candidates[person1_dst_peak_id.astype(int), 2] + person1_dst_connect_score
-                        person1_limbs[-2, 0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
+                        person1_limbs[joint_dst_type] = [limb_dst_peak_id, limb_connect_score]
                         person1_limbs[-1, 1] = max(limb_len, person1_limb_len)
+                        person1_limbs[-2, 0] += joint_candidates[limb_dst_peak_id.astype(int), 2] + limb_connect_score
 
                 elif len(person_assoc_idx) == 2:  # if found 2 and disjoint, merge them (disjoint：不相交)
                     # If humans `H1` and `H2` share a part index with the same coordinates,
@@ -503,27 +499,27 @@ def find_humans(connected_limbs, special_limb, joint_list, test_cfg, joint2limb_
                     person2_limbs = person_to_joint_assoc[person2_id]  # > (20,2)
                     person1_limb_len = person1_limbs[-1, 1]
 
-                    membership1 = ((person1_limbs[..., 0] >= 0).astype(int))[:-2]  # > (18,)
-                    membership2 = ((person2_limbs[..., 0] >= 0).astype(int))[:-2]  # > (18,)
-                    membership = membership1 + membership2  # > (18,)
+                    membership1 = ((person1_limbs[..., 0] >= 0).astype(int))[:-2]  # > ids: (18,)=[0, 1]
+                    membership2 = ((person2_limbs[..., 0] >= 0).astype(int))[:-2]  # > ids: (18,)=[0, 1]
+                    membership = membership1 + membership2  # > bool mask: (18,)
                     # > this joint corresponds to the same person, increase joint count of this person.
                     if len(np.nonzero(membership == 2)[0]) == 0:  # if found 2 and disjoint, merge them
 
-                        min_limb1 = np.min(person1_limbs[:-2, 1][membership1 == 1])  # (18,) -> (#pos,) -> scalar
-                        min_limb2 = np.min(person2_limbs[:-2, 1][membership2 == 1])  # (18,) -> (#pos,) -> scalar
+                        min_limb1 = np.min(person1_limbs[:-2, 1][membership1 == 1])  # (18,) -> (#positive,) -> scalar
+                        min_limb2 = np.min(person2_limbs[:-2, 1][membership2 == 1])  # (18,) -> (#positive,) -> scalar
                         min_tolerance = min(min_limb1, min_limb2)  # > min confidence
-                        if limb_connect_score >= connection_tole * min_tolerance or \
-                           person1_limb_len * len_rate > limb_len:
+                        if limb_connect_score >= connection_tole * min_tolerance and \
+                           limb_len < person1_limb_len * len_rate:
                             # > do not connect if confidence is low or current limb is longer than existed one.
-                            # continue
-                            person1_limbs[:-2] += (person2_limbs[:-2] + 1)  # > (18,2)
+                            # > sum up all keypoint values
+                            # person1_limbs[:-2] += (person2_limbs[:-2] + 1)  # > (18,2)
+                            person1_limbs[:-2] = np.maximum(person1_limbs[:-2], person2_limbs[:-2])  # > (18,2)
 
                             # 对于没有节点标记的地方，因为两行subset相应位置处都是-1,所以合并之后没有节点的部分依旧是-１
                             # 把不相交的两个subset[j1],[j2]中的id号进行相加，从而完成合并，这里+1是因为默认没有找到关键点初始值是-1
-                            person1_limbs[-2:][:, 0] += person2_limbs[-2:][:, 0]  # 两行subset的点的个数和总置信度相加
-
-                            person1_limbs[-2, 0] += limb_connect_score
+                            person1_limbs[-1, 0] += person2_limbs[-1, 0]  # 两行subset的点的个数和总置信度相加
                             person1_limbs[-1, 1] = max(limb_len, person1_limb_len)
+                            person1_limbs[-2, 0] += person2_limbs[-2, 0] + limb_connect_score
                             # 注意：　因为是disjoint的两行person_to_joint_assoc点的merge，因此先前存在的节点的置信度之前已经被加过了 !! 这里只需要再加当前考察的limb的置信度
                             person_to_joint_assoc = np.delete(person_to_joint_assoc, person2_id, 0)
 
@@ -591,6 +587,8 @@ def find_humans(connected_limbs, special_limb, joint_list, test_cfg, joint2limb_
                     # > joint score + limb score
                     row = row[np.newaxis, :, :]
                     person_to_joint_assoc = np.concatenate((person_to_joint_assoc, row), axis=0)  # -> (1, 20, 2)
+
+
     # 将没有被分配到一些人身上的点分配给距离它们近，并且缺少此类节点的人身上？或许这样做坏处更多
     # Delete people who have very few parts connected
     people_to_delete = []

@@ -10,13 +10,32 @@ Also this repo serves as the **Part B** of our paper "Multi-Person Pose Estimati
 
 A bottom-up approach for the problem of multi-person pose estimation.
 
-![heatmap](visulizatoin/2987.Figure2.png)
+![heatmap](visual/2987.Figure2.png)
 
-![network](visulizatoin/2987.Figure3.png)
+![network](visual/2987.Figure3.png)
 
-![network](visulizatoin/network_details.png)
+![network](visual/network_details.png)
 
-![skeleton](visulizatoin/skeleton.png)
+![optimization](visual/optimization.png)
+
+![skeleton](visual/skeleton.png)
+
+### Changed log
+* human score calculation: 
+  * changed `1 - 1.0 / score` to `score / joint count`. 
+  * This increased `0.3 %` AP overall (minival 2017).
+* add C++ acceleration for post-processing.
+* results of sorting in C++ is different from Python
+  * this gives different results accordingly
+
+### Evaluation results
+| Changes | Input size | MS | Flip | AP | AP(M) | AP(L) | AR | AR(M) | AR(L) | fps |
+| :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: |
+| original| 512 | | v | 65.8 | 59.0 | 75.8 | 69.9 | 61.2 | 82.3 | 2.2 fps |
+| refactored | 512 | | v | 65.8 | 59.0 | 75.9 | 69.9 | 61.2 | 82.5 | 3.3 fps |
+| refactored + score calc | 512 | | v | 66.1 | 59.8 | 76.2 | 69.9 | 61.2 | 82.6 | 
+| refactored + cpp + score calc| 512 | | v | 65.8 | 59.6 | 75.4 | 69.8 | 61.0 | 82.1 | 7.3 fps |
+* Tested on `GeForce 2080 Ti x 1`
 
 ### Contents
 
@@ -47,13 +66,17 @@ A bottom-up approach for the problem of multi-person pose estimation.
 
    Alternatively, download the pre-trained model without optimizer checkpoint only for the default configuration via: [GoogleDrive](https://drive.google.com/open?id=1gLa2oNxnbFPo0BjnpPaiAmWJwyND8wkA)
 
-4. Change the paths in the code according to your environment.
+4. Compile Cpp files  
+   * `cd utils/pafprocess`
+   * `sh make.sh`
+
+5. Change the paths in the code according to your environment.
 
 ## Run a Demo
 
 `python demo_image.py`
 
-![examples](visulizatoin/examples.png)
+![examples](visual/examples.png)
 
 ## Inference Speed
 
@@ -68,6 +91,40 @@ The corresponding code is in pure python without multiprocess for now.
 
 `python evaluate.py` 
 
+## Refactored Python
+Results on MSCOCO 2017 minival skeletons with **refactored Python** (focal L2 loss with gamma=2):
+```
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= 20 ] = 0.661
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets= 20 ] = 0.859
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets= 20 ] = 0.716
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets= 20 ] = 0.598
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets= 20 ] = 0.762
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 20 ] = 0.699
+ Average Recall     (AR) @[ IoU=0.50      | area=   all | maxDets= 20 ] = 0.873
+ Average Recall     (AR) @[ IoU=0.75      | area=   all | maxDets= 20 ] = 0.742
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets= 20 ] = 0.612
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets= 20 ] = 0.825
+```
+* run about `3` fps using official pretrained model, post-processing included. 
+
+## Refactored Python + Cpp
+Results on MSCOCO 2017 minival skeletons (focal L2 loss with gamma=2):
+```
+
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets= 20 ] = 0.658
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets= 20 ] = 0.856
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets= 20 ] = 0.713
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets= 20 ] = 0.596
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets= 20 ] = 0.754
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 20 ] = 0.698
+ Average Recall     (AR) @[ IoU=0.50      | area=   all | maxDets= 20 ] = 0.872
+ Average Recall     (AR) @[ IoU=0.75      | area=   all | maxDets= 20 ] = 0.740
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets= 20 ] = 0.610
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets= 20 ] = 0.824
+```
+* run about `7` fps using official pretrained model, post-processing included.
+
+## Official 
 Results on MSCOCO 2017 test-dev skeletons (focal L2 loss with gamma=2):
 
 ```
@@ -108,6 +165,7 @@ python -m torch.distributed.launch --nproc_per_node=4 train_distributed.py
 - [Realtime Multi-Person Pose Estimation verson 1](https://github.com/michalfaber/keras_Realtime_Multi-Person_Pose_Estimation)
 - [Realtime Multi-Person Pose Estimation verson 2](https://github.com/anatolix/keras_Realtime_Multi-Person_Pose_Estimation)
 - [Realtime Multi-Person Pose Estimation version 3](https://github.com/ZheC/Realtime_Multi-Person_Pose_Estimation)
+- [Realtime Multi-Person Pose Estimation by tensorboy](https://github.com/tensorboy/pytorch_Realtime_Multi-Person_Pose_Estimation)
 - [Associative Embedding](https://github.com/princeton-vl/pose-ae-train)
 - [NVIDIA/apex](https://github.com/NVIDIA/apex)
 

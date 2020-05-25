@@ -7,13 +7,15 @@ const float THRESH_HEAT = 0.05;
 const float THRESH_PAF_SCORE = 0.1;
 const float THRESH_PAF_STEP_RATIO = 0.8;
 const int THRESH_PART_CNT = 2;
-const float THRESH_HUMAN_SCORE = 0.45;
+const float THRESH_SKELETON_SCORE = 0.45;
 const int NUM_PART = 18;
 const int NUM_PART_OUTS = NUM_PART + 2;
 const int STEP_PAF = 20;
 const int LIMB_LENGTH_RATE = 16;
 const float MIN_SCORE_TOLERANCE = 0.7;
 const bool DELETE_SHARED_JOINTS = false;
+const float PAF_OUT_WEIGHTS[] = {0.5, 0.25, 0.25};
+const int NOT_ASSIGNED = -1;
 
 const int COCOPAIRS_SIZE = 30;
 const int COCOPAIRS[COCOPAIRS_SIZE][2] = {
@@ -51,7 +53,7 @@ struct ConnectionCandidate {
     int idx1;
     int idx2;
     float score;
-    float etc;
+    float overall_score;
     float length;
 };
 
@@ -65,7 +67,7 @@ struct Connection {
 };
 
 
-int process_paf(int p1, int p2, int p3, float *peaks, int h1, int h2, int h3, float *heatmap, int f1, int f2, int f3, float *pafmap);
+int process_paf(int p1, int p2, int p3, float *peaks, int f1, int f2, int f3, float *pafmap, int min_img_size);
 int get_num_humans();
 int get_part_peak_id(int skeleton_id, int part_id);
 float get_score(int skeleton_id);

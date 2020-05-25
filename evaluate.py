@@ -38,7 +38,6 @@ colors = [[255, 0, 0], [255, 85, 0], [255, 170, 0], [255, 255, 0], [170, 255, 0]
           [128, 114, 250], [130, 238, 238], [48, 167, 238], [180, 105, 255]]
 
 ORDER_COCO = [0, 15, 14, 17, 16, 5, 2, 6, 3, 7, 4, 11, 8, 12, 9, 13, 10]
-# ORDER_COCO = [0, 6, 8, 10, 5, 7, 9, 12, 14, 16, 11, 13, 15, 2, 1, 4, 3]
 torch.cuda.empty_cache()
 
 parser = argparse.ArgumentParser(description='PoseNet Training')
@@ -51,7 +50,8 @@ parser.add_argument('--output', type=str, default='result.jpg', help='output ima
 parser.add_argument('--opt-level', type=str, default='O1')
 parser.add_argument('--keep-batchnorm-fp32', type=str, default=None)
 parser.add_argument('--loss-scale', type=str, default=None)
-
+parser.add_argument('--run_refactor', action='store_true')
+parser.add_argument('--run_cpp', action='store_true')
 args = parser.parse_args()
 
 # ###################################  Setup for some configurations ###########################################
@@ -62,8 +62,7 @@ joint2limb_pairs = config.limbs_conn  # > 30
 dt_gt_mapping = config.dt_gt_mapping
 NUM_KEYPOINTS = 18
 NUM_COCO_KEYPOINTS = 17
-RUN_REFACTOR = True
-RUN_WITH_CPP = True
+NUM_TEST_IMG = -1
 TEST_SET = 'val2017'
 
 
@@ -72,7 +71,7 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
 
     ori_img = cv2.imread(input_image_path)
     img_h, img_w, _ = ori_img.shape
-    if RUN_REFACTOR:
+    if args.run_refactor:
         heatmaps, pafs = predict_refactor(ori_img, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=config)
         all_peaks = heatmap_nms(heatmaps, model_cfg['stride'])
         pafs = cv2.resize(pafs, None,
@@ -80,12 +79,12 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
                           fy=model_cfg['stride'],
                           interpolation=cv2.INTER_CUBIC)
     else:
-        # > [1] original
+        # > [1] original`
         heatmaps, pafs = predict(ori_img, model, test_cfg, model_cfg, input_image_path, flip_avg=True, config=config)
         all_peaks = find_peaks(heatmaps, test_cfg)
 
     end = time.time()
-    if not RUN_WITH_CPP:
+    if not args.run_cpp:
         connected_limbs, special_limb = find_connections(all_peaks, pafs, img_h, test_cfg, joint2limb_pairs)
         person_to_joint_assoc, joint_candidates = find_humans(connected_limbs, special_limb, all_peaks, test_cfg, joint2limb_pairs)
 
@@ -96,7 +95,7 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
               'Speed {2:.3f} ({3:.3f})\t'.format(1, 1, 1 / batch_time.val, 1 / batch_time.avg, batch_time=batch_time))
 
     humans = []
-    if RUN_REFACTOR:  # Refactored
+    if args.run_refactor:  # Refactored
         joint_list = np.array([
             tuple(peak) + (joint_type,)
             for joint_type, joint_peaks in enumerate(all_peaks)
@@ -104,34 +103,29 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
         ]).astype(np.float32)
 
         if joint_list.shape[0] > 0:
-            if RUN_WITH_CPP:
-                # `heatmap_upsamp`: (H, W, 19)
-                heatmap_upsamp = cv2.resize(
-                    heatmaps, None,
-                    fx=model_cfg['stride'],
-                    fy=model_cfg['stride'],
-                    interpolation=cv2.INTER_CUBIC)
+            if args.run_cpp:
                 # `joint_list`: (#person * 18, 5)
                 joint_list = np.expand_dims(joint_list, 0)
                 paf_upsamp = pafs
-                pafprocess.process_paf(joint_list, heatmap_upsamp, paf_upsamp)
+                pafprocess.process_paf(joint_list, paf_upsamp, img_h)
                 for human_id in range(pafprocess.get_num_humans()):
                     human = Human([])
                     is_added = False
                     for part_idx in range(NUM_KEYPOINTS):
-                        c_idx = int(pafprocess.get_part_peak_id(human_id, part_idx))
-                        if c_idx < 0:
+                        peak_id = int(pafprocess.get_part_peak_id(human_id, part_idx))
+                        if peak_id < 0:
                             continue
                         is_added = True
                         human.body_parts[part_idx] = BodyPart(
-                            '%d-%d' % (human_id, part_idx), part_idx,
-                            pafprocess.get_part_x(c_idx),
-                            pafprocess.get_part_y(c_idx),
-                            pafprocess.get_part_score(c_idx)
+                            '%d-%d' % (human_id, part_idx),
+                            part_idx,
+                            pafprocess.get_part_x(peak_id),
+                            pafprocess.get_part_y(peak_id),
+                            pafprocess.get_part_score(peak_id)
                         )
                     if is_added:
                         score = pafprocess.get_score(human_id)
-                        human.score = 1 - 1.0 / score
+                        human.score = score
                         humans.append(human)
             else:
                 # > python
@@ -150,12 +144,12 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
                             x, y,
                             peak_score
                         )
-                        # print('> [', person_id, '] / [', peak_id, '] = ', (x, y))
                     if is_added:
-                        limb_score = person[-2]
-                        # TOCHECK: 1 - 1.0 / person[-2]
-                        # limb_score = 1 - 1.0 / person[-2]
-                        human.score = 1 - 1.0 / limb_score  # TOCHECK: w/ or w/o ?
+                        score = person[-2]
+                        count = person[-1]
+                        # human.score = 1 - 1.0 / score
+                        human.score = score / count  # 66.1
+                        # human.score = 1 - 1 / (score / count)  # 66.1
                         humans.append(human)
 
     else:
@@ -175,7 +169,9 @@ def process(input_image_path, model, test_cfg, model_cfg, heat_layers, paf_layer
             coco_keypoints = np.array(person_keypoint_coordinates)[ORDER_COCO, :]
 
             # person[-2] is the score,
-            humans.append((coco_keypoints, 1 - 1.0 / person[-2]))  # TOCHECK: 1-(1/x)?
+            score = person[-2]
+            count = person[-1]
+            humans.append((coco_keypoints, score / count))
     return humans
 
 
@@ -184,7 +180,7 @@ def get_image_name(coco, image_id):
 
 
 def append_result(image_id, humans, all_outputs):
-    if RUN_REFACTOR:
+    if args.run_refactor:
         for human in humans:
             one_result = {
                 "image_id": 0,
@@ -250,9 +246,12 @@ def validation(model, dump_name, img_subdir):
     print('> ann_file=', ann_file)
 
     cocoGt = COCO(ann_file)
-    # cat_ids = cocoGt.getCatIds(catNms=['person'])
-    # img_ids = cocoGt.getImgIds(catIds=cat_ids)
-    img_ids = cocoGt.getImgIds()[:500]
+    if NUM_TEST_IMG > 0:
+        img_ids = cocoGt.getImgIds()
+    else:
+        cat_ids = cocoGt.getCatIds(catNms=['person'])
+        # img_ids = cocoGt.getImgIds(catIds=cat_ids)[93:94]
+        img_ids = cocoGt.getImgIds(catIds=cat_ids)
 
     results_file = 'results/%s_%s_results.json' % (valset_name, dump_name)
     print('the path of detected keypoint file is: ', results_file)
