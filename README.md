@@ -29,12 +29,12 @@ A bottom-up approach for the problem of multi-person pose estimation.
   * this gives different results accordingly
 
 ### Evaluation results
-| Changes | Input size | MS | Flip | AP | AP(M) | AP(L) | AR | AR(M) | AR(L) | fps |
-| :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: |
-| original| 512 | | v | 65.8 | 59.0 | 75.8 | 69.9 | 61.2 | 82.3 | 2.2 fps |
-| refactored | 512 | | v | 65.8 | 59.0 | 75.9 | 69.9 | 61.2 | 82.5 | 3.3 fps |
-| refactored + score calc | 512 | | v | 66.1 | 59.8 | 76.2 | 69.9 | 61.2 | 82.6 | 
-| refactored + cpp + score calc| 512 | | v | 65.8 | 59.6 | 75.4 | 69.8 | 61.0 | 82.1 | 7.3 fps |
+| Changes | Input size | C++ | MS | Flip | AP | AP(M) | AP(L) | AR | AR(M) | AR(L) | fps |
+| :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: |
+| original| 512 | | | v | 65.8 | 59.0 | 75.8 | 69.9 | 61.2 | 82.3 | 2.2 fps |
+| refactored | 512 | | | v | 65.8 | 59.0 | 75.9 | 69.9 | 61.2 | 82.5 | 3.3 fps |
+| refactored + score calc | 512 | | | v | 66.1 | 59.8 | 76.2 | 69.9 | 61.2 | 82.6 | 
+| refactored + score calc| 512 | v | | v | 65.8 | 59.6 | 75.4 | 69.8 | 61.0 | 82.1 | 7.3 fps |
 * Tested on `GeForce 2080 Ti x 1`
 
 ### Contents
